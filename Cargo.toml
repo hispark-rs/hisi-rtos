@@ -1,0 +1,15 @@
+[package]
+name = "hisi-rtos"
+version = "0.1.0-alpha.1"
+edition = "2024"
+description = "Runtime and scheduler services for HiSilicon embedded Rust firmware"
+license = "MIT"
+repository = "https://github.com/hispark-rs/hisi-rtos"
+readme = "README.md"
+keywords = ["embedded", "no-std", "riscv", "rtos"]
+categories = ["embedded", "no-std"]
+
+[dependencies]
+critical-section = "1"
+hisi-rf-rtos-driver = "0.1.0-alpha.2"
+
