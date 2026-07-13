@@ -354,15 +354,9 @@ fn spawn(entry: TaskFn, arg: *mut c_void, stack_size: usize) -> Option<usize> {
     }
     // 16-byte aligned stack top.
     let top = (stack as usize + size) & !0xf;
-    critical_section::with(|cs| {
+    let slot = critical_section::with(|cs| {
         let s = &mut *SCHED.borrow_ref_mut(cs);
-        let i = match s.alloc_slot() {
-            Some(i) => i,
-            None => {
-                deallocate(stack);
-                return None;
-            }
-        };
+        let i = s.alloc_slot()?;
         let t = &mut s.tasks[i];
         t.ctx = Ctx::zero();
         #[cfg(target_arch = "riscv32")]
@@ -388,7 +382,11 @@ fn spawn(entry: TaskFn, arg: *mut c_void, stack_size: usize) -> Option<usize> {
         t.wake_at = 0;
         s.ready_push(i);
         Some(i)
-    })
+    });
+    if slot.is_none() {
+        deallocate(stack);
+    }
+    slot
 }
 
 /// Switch away from `prev` to the next ready task, busy-idling (waking sleepers)
@@ -396,9 +394,10 @@ fn spawn(entry: TaskFn, arg: *mut c_void, stack_size: usize) -> Option<usize> {
 /// (Ready+queued for yield, Blocked for a wait, Free for exit).
 fn switch_away(prev: usize) {
     loop {
+        let now = now_ms();
         let next = critical_section::with(|cs| {
             let s = &mut *SCHED.borrow_ref_mut(cs);
-            s.wake_sleepers(now_ms());
+            s.wake_sleepers(now);
             s.ready_pop()
         });
         if next == NIL {
@@ -447,11 +446,12 @@ fn sleep_ms(ms: u32) {
         yield_now();
         return;
     }
+    let wake_at = now_ms().saturating_add(ms as u64);
     let prev = critical_section::with(|cs| {
         let s = &mut *SCHED.borrow_ref_mut(cs);
         let cur = s.current;
         s.tasks[cur].state = State::Sleeping;
-        s.tasks[cur].wake_at = now_ms().saturating_add(ms as u64);
+        s.tasks[cur].wake_at = wake_at;
         cur
     });
     switch_away(prev);
