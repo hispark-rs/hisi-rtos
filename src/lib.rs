@@ -243,6 +243,7 @@ struct Tcb {
     waiting_sem: usize,
     sem_granted: bool,
     priority: u8,
+    scheduler_lock_depth: u16,
 }
 impl Tcb {
     const fn empty() -> Self {
@@ -257,6 +258,7 @@ impl Tcb {
             waiting_sem: 0,
             sem_granted: false,
             priority: (PRIORITY_LEVELS - 1) as u8,
+            scheduler_lock_depth: 0,
         }
     }
 }
@@ -354,6 +356,22 @@ impl Sched {
             self.retired_stacks[self.retired_count] = stack;
             self.retired_count += 1;
         }
+    }
+    fn lock_current(&mut self) -> Result<(), DriverError> {
+        let task = &mut self.tasks[self.current];
+        task.scheduler_lock_depth = task
+            .scheduler_lock_depth
+            .checked_add(1)
+            .ok_or(DriverError::Runtime)?;
+        Ok(())
+    }
+    fn unlock_current(&mut self) -> Result<(), DriverError> {
+        let task = &mut self.tasks[self.current];
+        if task.scheduler_lock_depth == 0 {
+            return Err(DriverError::InvalidContext);
+        }
+        task.scheduler_lock_depth -= 1;
+        Ok(())
     }
     fn wake_sleepers(&mut self, now: u64) {
         for i in 0..MAX_TASKS {
@@ -840,6 +858,14 @@ impl Runtime for HisiRuntime {
         })
     }
 
+    fn lock_scheduler(&self) -> Result<(), DriverError> {
+        critical_section::with(|cs| SCHED.borrow_ref_mut(cs).lock_current())
+    }
+
+    fn unlock_scheduler(&self) -> Result<(), DriverError> {
+        critical_section::with(|cs| SCHED.borrow_ref_mut(cs).unlock_current())
+    }
+
     fn semaphore_create(&self, initial: u32) -> Result<SemaphoreHandle, DriverError> {
         let count = i32::try_from(initial).map_err(|_| DriverError::Runtime)?;
         let pointer = allocate(core::mem::size_of::<Semaphore>()) as *mut Semaphore;
@@ -951,5 +977,17 @@ mod tests {
 
         assert_eq!(scheduler.retired_count, 2);
         assert_eq!(&scheduler.retired_stacks[..2], &[0x1000, 0x2000]);
+    }
+
+    #[test]
+    fn scheduler_lock_is_nested_and_rejects_unbalanced_unlock() {
+        let mut scheduler = Sched::new();
+        scheduler.tasks[0].state = State::Running;
+        scheduler.lock_current().unwrap();
+        scheduler.lock_current().unwrap();
+        assert_eq!(scheduler.tasks[0].scheduler_lock_depth, 2);
+        scheduler.unlock_current().unwrap();
+        scheduler.unlock_current().unwrap();
+        assert_eq!(scheduler.unlock_current(), Err(DriverError::InvalidContext));
     }
 }
