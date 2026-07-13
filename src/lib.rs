@@ -50,6 +50,18 @@ pub struct Resources {
 pub struct Config {
     /// Minimum stack allocation applied to every task request.
     pub minimum_stack_size: NonZeroUsize,
+    /// Ready-queue selection policy.
+    pub scheduling: SchedulingPolicy,
+}
+
+/// Scheduling policy selected before the runtime starts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SchedulingPolicy {
+    /// Explicit yield/block points use creation-order FIFO scheduling.
+    Cooperative,
+    /// Explicit scheduling points select the lowest numeric task priority.
+    /// This does not by itself enable timer-driven preemption.
+    Priority,
 }
 
 impl Default for Config {
@@ -57,6 +69,7 @@ impl Default for Config {
         Self {
             // The WS63 vendor archive was built with a 24 KiB LiteOS default.
             minimum_stack_size: NonZeroUsize::new(24 * 1024).unwrap(),
+            scheduling: SchedulingPolicy::Cooperative,
         }
     }
 }
@@ -255,6 +268,7 @@ struct Sched {
     ready_tail: [usize; PRIORITY_LEVELS],
     retired_stacks: [usize; MAX_TASKS],
     retired_count: usize,
+    priority_scheduling: bool,
     started: bool,
 }
 impl Sched {
@@ -267,11 +281,16 @@ impl Sched {
             ready_tail: [NIL; PRIORITY_LEVELS],
             retired_stacks: [0; MAX_TASKS],
             retired_count: 0,
+            priority_scheduling: false,
             started: false,
         }
     }
     fn ready_push(&mut self, i: usize) {
-        let priority = self.tasks[i].priority as usize;
+        let priority = if self.priority_scheduling {
+            self.tasks[i].priority as usize
+        } else {
+            0
+        };
         self.tasks[i].next = NIL;
         if self.ready_tail[priority] == NIL {
             self.ready_head[priority] = i;
@@ -295,7 +314,11 @@ impl Sched {
         NIL
     }
     fn ready_remove(&mut self, task: usize) {
-        let priority = self.tasks[task].priority as usize;
+        let priority = if self.priority_scheduling {
+            self.tasks[task].priority as usize
+        } else {
+            0
+        };
         let mut previous = NIL;
         let mut current = self.ready_head[priority];
         while current != NIL {
@@ -397,6 +420,7 @@ extern "C" fn trampoline() -> ! {
 /// Initialize the scheduler, adopting the current execution as the main task
 /// (slot 0). Idempotent.
 fn init() {
+    let priority_scheduling = matches!(start_state().config.scheduling, SchedulingPolicy::Priority);
     critical_section::with(|cs| {
         let s = &mut *SCHED.borrow_ref_mut(cs);
         if s.started {
@@ -404,6 +428,7 @@ fn init() {
         }
         s.tasks[0].state = State::Running;
         s.current = 0;
+        s.priority_scheduling = priority_scheduling;
         s.started = true;
     });
 }
@@ -868,6 +893,7 @@ mod tests {
     #[test]
     fn ready_queue_prefers_lower_priority_number_and_keeps_fifo() {
         let mut scheduler = Sched::new();
+        scheduler.priority_scheduling = true;
         ready_task(&mut scheduler, 1, 8);
         ready_task(&mut scheduler, 2, 4);
         ready_task(&mut scheduler, 3, 4);
@@ -881,6 +907,7 @@ mod tests {
     #[test]
     fn ready_task_can_move_between_priority_queues() {
         let mut scheduler = Sched::new();
+        scheduler.priority_scheduling = true;
         ready_task(&mut scheduler, 1, 8);
         ready_task(&mut scheduler, 2, 4);
 
@@ -902,6 +929,18 @@ mod tests {
 
         assert_eq!(scheduler.take_yield_target(1), Some(2));
         assert_eq!(scheduler.ready_pop(), 1);
+    }
+
+    #[test]
+    fn cooperative_policy_keeps_fifo_across_task_priorities() {
+        let mut scheduler = Sched::new();
+        ready_task(&mut scheduler, 1, 8);
+        ready_task(&mut scheduler, 2, 4);
+        ready_task(&mut scheduler, 3, 2);
+
+        assert_eq!(scheduler.ready_pop(), 1);
+        assert_eq!(scheduler.ready_pop(), 2);
+        assert_eq!(scheduler.ready_pop(), 3);
     }
 
     #[test]
