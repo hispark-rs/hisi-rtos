@@ -11,5 +11,4 @@ categories = ["embedded", "no-std"]
 
 [dependencies]
 critical-section = "1"
-hisi-rf-rtos-driver = "0.1.0-alpha.2"
-
+hisi-rf-rtos-driver = "0.1.0-alpha.3"

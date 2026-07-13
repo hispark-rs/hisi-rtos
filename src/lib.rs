@@ -29,6 +29,8 @@ use hisi_rf_rtos_driver::{
 
 /// Max concurrent tasks (slot table; the WiFi stack uses only a few).
 const MAX_TASKS: usize = 16;
+/// LiteOS-compatible priority levels: 0 is highest, 31 is lowest.
+const PRIORITY_LEVELS: usize = 32;
 /// Sentinel "no task" index for intrusive list links.
 const NIL: usize = usize::MAX;
 
@@ -227,6 +229,7 @@ struct Tcb {
     wake_at: u64, // mask-ROM systick millisecond deadline
     waiting_sem: usize,
     sem_granted: bool,
+    priority: u8,
 }
 impl Tcb {
     const fn empty() -> Self {
@@ -240,6 +243,7 @@ impl Tcb {
             wake_at: 0,
             waiting_sem: 0,
             sem_granted: false,
+            priority: (PRIORITY_LEVELS - 1) as u8,
         }
     }
 }
@@ -247,8 +251,10 @@ impl Tcb {
 struct Sched {
     tasks: [Tcb; MAX_TASKS],
     current: usize,
-    ready_head: usize,
-    ready_tail: usize,
+    ready_head: [usize; PRIORITY_LEVELS],
+    ready_tail: [usize; PRIORITY_LEVELS],
+    retired_stacks: [usize; MAX_TASKS],
+    retired_count: usize,
     started: bool,
 }
 impl Sched {
@@ -257,30 +263,65 @@ impl Sched {
         Sched {
             tasks: [E; MAX_TASKS],
             current: 0,
-            ready_head: NIL,
-            ready_tail: NIL,
+            ready_head: [NIL; PRIORITY_LEVELS],
+            ready_tail: [NIL; PRIORITY_LEVELS],
+            retired_stacks: [0; MAX_TASKS],
+            retired_count: 0,
             started: false,
         }
     }
     fn ready_push(&mut self, i: usize) {
+        let priority = self.tasks[i].priority as usize;
         self.tasks[i].next = NIL;
-        if self.ready_tail == NIL {
-            self.ready_head = i;
+        if self.ready_tail[priority] == NIL {
+            self.ready_head[priority] = i;
         } else {
-            self.tasks[self.ready_tail].next = i;
+            self.tasks[self.ready_tail[priority]].next = i;
         }
-        self.ready_tail = i;
+        self.ready_tail[priority] = i;
     }
     fn ready_pop(&mut self) -> usize {
-        let i = self.ready_head;
-        if i != NIL {
-            self.ready_head = self.tasks[i].next;
-            if self.ready_head == NIL {
-                self.ready_tail = NIL;
+        for priority in 0..PRIORITY_LEVELS {
+            let i = self.ready_head[priority];
+            if i != NIL {
+                self.ready_head[priority] = self.tasks[i].next;
+                if self.ready_head[priority] == NIL {
+                    self.ready_tail[priority] = NIL;
+                }
+                self.tasks[i].next = NIL;
+                return i;
             }
-            self.tasks[i].next = NIL;
         }
-        i
+        NIL
+    }
+    fn ready_remove(&mut self, task: usize) {
+        let priority = self.tasks[task].priority as usize;
+        let mut previous = NIL;
+        let mut current = self.ready_head[priority];
+        while current != NIL {
+            if current == task {
+                let next = self.tasks[current].next;
+                if previous == NIL {
+                    self.ready_head[priority] = next;
+                } else {
+                    self.tasks[previous].next = next;
+                }
+                if self.ready_tail[priority] == current {
+                    self.ready_tail[priority] = previous;
+                }
+                self.tasks[current].next = NIL;
+                return;
+            }
+            previous = current;
+            current = self.tasks[current].next;
+        }
+    }
+    fn retire_stack(&mut self, stack: usize) {
+        if stack != 0 {
+            debug_assert!(self.retired_count < MAX_TASKS);
+            self.retired_stacks[self.retired_count] = stack;
+            self.retired_count += 1;
+        }
     }
     fn wake_sleepers(&mut self, now: u64) {
         for i in 0..MAX_TASKS {
@@ -311,6 +352,20 @@ impl Sched {
 }
 
 static SCHED: Mutex<RefCell<Sched>> = Mutex::new(RefCell::new(Sched::new()));
+
+fn reclaim_retired_stacks() {
+    let (stacks, count) = critical_section::with(|cs| {
+        let scheduler = &mut *SCHED.borrow_ref_mut(cs);
+        let stacks = scheduler.retired_stacks;
+        let count = scheduler.retired_count;
+        scheduler.retired_stacks = [0; MAX_TASKS];
+        scheduler.retired_count = 0;
+        (stacks, count)
+    });
+    for stack in &stacks[..count] {
+        deallocate(*stack as *mut u8);
+    }
+}
 
 fn now_ms() -> u64 {
     (start_state().resources.monotonic_ms)()
@@ -345,8 +400,9 @@ fn init() {
 }
 
 /// Spawn a task. Returns its slot index, or `None` if the table/stack is full.
-fn spawn(entry: TaskFn, arg: *mut c_void, stack_size: usize) -> Option<usize> {
+fn spawn(entry: TaskFn, arg: *mut c_void, stack_size: usize, priority: u8) -> Option<usize> {
     init();
+    reclaim_retired_stacks();
     let size = stack_size.max(start_state().config.minimum_stack_size.get());
     let stack = allocate(size);
     if stack.is_null() {
@@ -380,6 +436,7 @@ fn spawn(entry: TaskFn, arg: *mut c_void, stack_size: usize) -> Option<usize> {
         t.entry = Some(entry);
         t.arg = arg as usize;
         t.wake_at = 0;
+        t.priority = priority;
         s.ready_push(i);
         Some(i)
     });
@@ -437,6 +494,7 @@ fn yield_now() {
         cur
     });
     switch_away(prev);
+    reclaim_retired_stacks();
 }
 
 /// Sleep the current task for `ms` milliseconds (cooperative; wakes when a later
@@ -455,6 +513,7 @@ fn sleep_ms(ms: u32) {
         cur
     });
     switch_away(prev);
+    reclaim_retired_stacks();
 }
 
 /// Current task slot index (its "pid"/"tid").
@@ -463,15 +522,14 @@ fn current_id() -> usize {
 }
 
 fn task_exit() -> ! {
-    // Mark the slot free and switch away forever. The stack is intentionally
-    // leaked: we are still executing on it until `switch_away` transfers control,
-    // and a single hart can't safely free the stack it is running on.
-    // TODO: defer-free exited stacks from another task. The WiFi worker model
-    // rarely exits tasks, so leaking here is acceptable for now.
+    // Retire the stack before switching away. A resumed task drains the retired
+    // list only after it is running on a different stack.
     let prev = critical_section::with(|cs| {
         let s = &mut *SCHED.borrow_ref_mut(cs);
         let cur = s.current;
-        s.tasks[cur] = Tcb::empty(); // -> Free (stack ptr dropped == leaked)
+        let stack = s.tasks[cur].stack;
+        s.tasks[cur] = Tcb::empty();
+        s.retire_stack(stack);
         cur
     });
     switch_away(prev);
@@ -691,8 +749,11 @@ impl Runtime for HisiRuntime {
         arg: *mut c_void,
         config: TaskConfig,
     ) -> Result<TaskId, DriverError> {
-        let slot =
-            spawn(entry, arg, config.stack_size.get()).ok_or(DriverError::ResourceExhausted)?;
+        if config.priority as usize >= PRIORITY_LEVELS {
+            return Err(DriverError::Runtime);
+        }
+        let slot = spawn(entry, arg, config.stack_size.get(), config.priority)
+            .ok_or(DriverError::ResourceExhausted)?;
         let raw = u32::try_from(slot).map_err(|_| DriverError::Runtime)?;
         Ok(TaskId::from_raw(raw))
     }
@@ -710,6 +771,30 @@ impl Runtime for HisiRuntime {
     fn current_task(&self) -> Result<TaskId, DriverError> {
         let raw = u32::try_from(current_id()).map_err(|_| DriverError::Runtime)?;
         Ok(TaskId::from_raw(raw))
+    }
+
+    fn set_task_priority(&self, task: TaskId, priority: u8) -> Result<(), DriverError> {
+        if priority as usize >= PRIORITY_LEVELS {
+            return Err(DriverError::Runtime);
+        }
+        let slot = usize::try_from(task.into_raw()).map_err(|_| DriverError::InvalidHandle)?;
+        critical_section::with(|cs| {
+            let scheduler = &mut *SCHED.borrow_ref_mut(cs);
+            let Some(tcb) = scheduler.tasks.get(slot) else {
+                return Err(DriverError::InvalidHandle);
+            };
+            if tcb.state == State::Free {
+                return Err(DriverError::InvalidHandle);
+            }
+            if tcb.state == State::Ready {
+                scheduler.ready_remove(slot);
+                scheduler.tasks[slot].priority = priority;
+                scheduler.ready_push(slot);
+            } else {
+                scheduler.tasks[slot].priority = priority;
+            }
+            Ok(())
+        })
     }
 
     fn semaphore_create(&self, initial: u32) -> Result<SemaphoreHandle, DriverError> {
@@ -749,5 +834,53 @@ impl Runtime for HisiRuntime {
     unsafe fn semaphore_destroy(&self, semaphore: SemaphoreHandle) -> Result<(), DriverError> {
         deallocate(semaphore.into_raw().get() as *mut u8);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ready_task(scheduler: &mut Sched, slot: usize, priority: u8) {
+        scheduler.tasks[slot].state = State::Ready;
+        scheduler.tasks[slot].priority = priority;
+        scheduler.ready_push(slot);
+    }
+
+    #[test]
+    fn ready_queue_prefers_lower_priority_number_and_keeps_fifo() {
+        let mut scheduler = Sched::new();
+        ready_task(&mut scheduler, 1, 8);
+        ready_task(&mut scheduler, 2, 4);
+        ready_task(&mut scheduler, 3, 4);
+
+        assert_eq!(scheduler.ready_pop(), 2);
+        assert_eq!(scheduler.ready_pop(), 3);
+        assert_eq!(scheduler.ready_pop(), 1);
+        assert_eq!(scheduler.ready_pop(), NIL);
+    }
+
+    #[test]
+    fn ready_task_can_move_between_priority_queues() {
+        let mut scheduler = Sched::new();
+        ready_task(&mut scheduler, 1, 8);
+        ready_task(&mut scheduler, 2, 4);
+
+        scheduler.ready_remove(1);
+        scheduler.tasks[1].priority = 2;
+        scheduler.ready_push(1);
+
+        assert_eq!(scheduler.ready_pop(), 1);
+        assert_eq!(scheduler.ready_pop(), 2);
+    }
+
+    #[test]
+    fn exited_stacks_are_retired_for_later_reclamation() {
+        let mut scheduler = Sched::new();
+        scheduler.retire_stack(0x1000);
+        scheduler.retire_stack(0x2000);
+
+        assert_eq!(scheduler.retired_count, 2);
+        assert_eq!(&scheduler.retired_stacks[..2], &[0x1000, 0x2000]);
     }
 }
