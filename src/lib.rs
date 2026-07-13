@@ -316,6 +316,15 @@ impl Sched {
             current = self.tasks[current].next;
         }
     }
+    fn take_yield_target(&mut self, current: usize) -> Option<usize> {
+        let next = self.ready_pop();
+        if next == NIL {
+            return None;
+        }
+        self.tasks[current].state = State::Ready;
+        self.ready_push(current);
+        Some(next)
+    }
     fn retire_stack(&mut self, stack: usize) {
         if stack != 0 {
             debug_assert!(self.retired_count < MAX_TASKS);
@@ -449,6 +458,27 @@ fn spawn(entry: TaskFn, arg: *mut c_void, stack_size: usize, priority: u8) -> Op
 /// Switch away from `prev` to the next ready task, busy-idling (waking sleepers)
 /// until one is runnable. `prev`'s state must already be set by the caller
 /// (Ready+queued for yield, Blocked for a wait, Free for exit).
+fn switch_to(prev: usize, next: usize) {
+    if next == prev {
+        critical_section::with(|cs| {
+            SCHED.borrow_ref_mut(cs).tasks[next].state = State::Running;
+        });
+        return;
+    }
+    let (op, np) = critical_section::with(|cs| {
+        let s = &mut *SCHED.borrow_ref_mut(cs);
+        s.tasks[next].state = State::Running;
+        s.current = next;
+        (
+            core::ptr::addr_of_mut!(s.tasks[prev].ctx),
+            core::ptr::addr_of!(s.tasks[next].ctx),
+        )
+    });
+    // SAFETY: contexts live in the static SCHED (stable address); single-hart,
+    // and the lock is released so the resumed task can re-enter the scheduler.
+    unsafe { context_switch(op, np) };
+}
+
 fn switch_away(prev: usize) {
     loop {
         let now = now_ms();
@@ -461,39 +491,27 @@ fn switch_away(prev: usize) {
             core::hint::spin_loop();
             continue;
         }
-        if next == prev {
-            // Only runnable task is ourselves: keep running (re-mark Running).
-            critical_section::with(|cs| {
-                SCHED.borrow_ref_mut(cs).tasks[next].state = State::Running;
-            });
-            return;
-        }
-        let (op, np) = critical_section::with(|cs| {
-            let s = &mut *SCHED.borrow_ref_mut(cs);
-            s.tasks[next].state = State::Running;
-            s.current = next;
-            (
-                core::ptr::addr_of_mut!(s.tasks[prev].ctx),
-                core::ptr::addr_of!(s.tasks[next].ctx),
-            )
-        });
-        // SAFETY: ctx live in the static SCHED (stable address); single-hart, the
-        // lock is released so the resumed task can re-enter the scheduler.
-        unsafe { context_switch(op, np) };
+        switch_to(prev, next);
         return;
     }
 }
 
 /// Yield the CPU: requeue the current task and run the next ready one.
 fn yield_now() {
-    let prev = critical_section::with(|cs| {
+    let now = now_ms();
+    let target = critical_section::with(|cs| {
         let s = &mut *SCHED.borrow_ref_mut(cs);
+        s.wake_sleepers(now);
         let cur = s.current;
-        s.tasks[cur].state = State::Ready;
-        s.ready_push(cur);
-        cur
+        // A cooperative yield promises progress to another ready task. Select
+        // that task before requeueing the current one; otherwise a strict
+        // priority queue would immediately select the yielding high-priority
+        // task again and starve lower-priority initialization work.
+        s.take_yield_target(cur).map(|next| (cur, next))
     });
-    switch_away(prev);
+    if let Some((prev, next)) = target {
+        switch_to(prev, next);
+    }
     reclaim_retired_stacks();
 }
 
@@ -872,6 +890,18 @@ mod tests {
 
         assert_eq!(scheduler.ready_pop(), 1);
         assert_eq!(scheduler.ready_pop(), 2);
+    }
+
+    #[test]
+    fn cooperative_yield_hands_off_before_requeueing_higher_priority_task() {
+        let mut scheduler = Sched::new();
+        scheduler.current = 1;
+        scheduler.tasks[1].state = State::Running;
+        scheduler.tasks[1].priority = 2;
+        ready_task(&mut scheduler, 2, 8);
+
+        assert_eq!(scheduler.take_yield_target(1), Some(2));
+        assert_eq!(scheduler.ready_pop(), 1);
     }
 
     #[test]
