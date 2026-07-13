@@ -64,6 +64,65 @@ pub enum SchedulingPolicy {
     Priority,
 }
 
+/// Read-only scheduler counters and task-state census for bring-up diagnostics.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Diagnostics {
+    pub context_switches: u32,
+    pub yields: u32,
+    pub sleeps: u32,
+    pub sleeper_wakes: u32,
+    pub semaphore_blocks: u32,
+    pub semaphore_wakes: u32,
+    pub semaphore_timeouts: u32,
+    pub scheduler_locks: u32,
+    pub current_task: usize,
+    pub ready_tasks: u8,
+    pub blocked_tasks: u8,
+    pub sleeping_tasks: u8,
+    pub current_lock_depth: u16,
+}
+
+/// State of one scheduler slot in a read-only bring-up snapshot.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TaskState {
+    #[default]
+    Free,
+    Ready,
+    Running,
+    Blocked,
+    Sleeping,
+}
+
+/// Read-only scheduler slot details for diagnosing blocked radio workers.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TaskDiagnostic {
+    pub task: usize,
+    pub state: TaskState,
+    pub entry: usize,
+    pub waiting_sem: usize,
+    pub wake_at: u64,
+    pub priority: u8,
+    pub scheduler_lock_depth: u16,
+}
+
+impl Diagnostics {
+    const EMPTY: Self = Self {
+        context_switches: 0,
+        yields: 0,
+        sleeps: 0,
+        sleeper_wakes: 0,
+        semaphore_blocks: 0,
+        semaphore_wakes: 0,
+        semaphore_timeouts: 0,
+        scheduler_locks: 0,
+        current_task: 0,
+        ready_tasks: 0,
+        blocked_tasks: 0,
+        sleeping_tasks: 0,
+        current_lock_depth: 0,
+    };
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -272,6 +331,7 @@ struct Sched {
     retired_count: usize,
     priority_scheduling: bool,
     started: bool,
+    diagnostics: Diagnostics,
 }
 impl Sched {
     const fn new() -> Self {
@@ -285,7 +345,48 @@ impl Sched {
             retired_count: 0,
             priority_scheduling: false,
             started: false,
+            diagnostics: Diagnostics::EMPTY,
         }
+    }
+
+    fn diagnostics(&self) -> Diagnostics {
+        let mut snapshot = self.diagnostics;
+        snapshot.current_task = self.current;
+        snapshot.current_lock_depth = self.tasks[self.current].scheduler_lock_depth;
+        for task in &self.tasks {
+            match task.state {
+                State::Ready => snapshot.ready_tasks = snapshot.ready_tasks.saturating_add(1),
+                State::Blocked => snapshot.blocked_tasks = snapshot.blocked_tasks.saturating_add(1),
+                State::Sleeping => {
+                    snapshot.sleeping_tasks = snapshot.sleeping_tasks.saturating_add(1)
+                }
+                State::Free | State::Running => {}
+            }
+        }
+        snapshot
+    }
+
+    fn task_diagnostics(&self, output: &mut [TaskDiagnostic]) -> usize {
+        let count = output.len().min(MAX_TASKS);
+        for (index, output) in output[..count].iter_mut().enumerate() {
+            let task = &self.tasks[index];
+            *output = TaskDiagnostic {
+                task: index,
+                state: match task.state {
+                    State::Free => TaskState::Free,
+                    State::Ready => TaskState::Ready,
+                    State::Running => TaskState::Running,
+                    State::Blocked => TaskState::Blocked,
+                    State::Sleeping => TaskState::Sleeping,
+                },
+                entry: task.entry.map_or(0, |entry| entry as usize),
+                waiting_sem: task.waiting_sem,
+                wake_at: task.wake_at,
+                priority: task.priority,
+                scheduler_lock_depth: task.scheduler_lock_depth,
+            };
+        }
+        count
     }
     fn ready_push(&mut self, i: usize) {
         let priority = if self.priority_scheduling {
@@ -350,6 +451,26 @@ impl Sched {
         self.ready_push(current);
         Some(next)
     }
+    fn take_preemption_target(&mut self) -> Option<(usize, usize)> {
+        if !self.priority_scheduling {
+            return None;
+        }
+        let current = self.current;
+        if self.tasks[current].state != State::Running
+            || self.tasks[current].scheduler_lock_depth != 0
+        {
+            return None;
+        }
+        let current_priority = self.tasks[current].priority as usize;
+        if !(0..current_priority).any(|priority| self.ready_head[priority] != NIL) {
+            return None;
+        }
+        let next = self.ready_pop();
+        debug_assert!(next != NIL);
+        self.tasks[current].state = State::Ready;
+        self.ready_push(current);
+        Some((current, next))
+    }
     fn retire_stack(&mut self, stack: usize) {
         if stack != 0 {
             debug_assert!(self.retired_count < MAX_TASKS);
@@ -363,6 +484,7 @@ impl Sched {
             .scheduler_lock_depth
             .checked_add(1)
             .ok_or(DriverError::Runtime)?;
+        self.diagnostics.scheduler_locks = self.diagnostics.scheduler_locks.saturating_add(1);
         Ok(())
     }
     fn unlock_current(&mut self) -> Result<(), DriverError> {
@@ -373,13 +495,22 @@ impl Sched {
         task.scheduler_lock_depth -= 1;
         Ok(())
     }
+
+    fn unlock_current_and_take_preemption(
+        &mut self,
+    ) -> Result<Option<(usize, usize)>, DriverError> {
+        self.unlock_current()?;
+        Ok(self.take_preemption_target())
+    }
     fn wake_sleepers(&mut self, now: u64) {
         for i in 0..MAX_TASKS {
             if self.tasks[i].state == State::Sleeping && now >= self.tasks[i].wake_at {
                 self.tasks[i].state = State::Ready;
                 self.ready_push(i);
+                self.diagnostics.sleeper_wakes = self.diagnostics.sleeper_wakes.saturating_add(1);
             } else if self.tasks[i].state == State::Blocked
                 && self.tasks[i].waiting_sem != 0
+                && self.tasks[i].wake_at != 0
                 && now >= self.tasks[i].wake_at
             {
                 let sem = self.tasks[i].waiting_sem as *const Semaphore;
@@ -393,6 +524,8 @@ impl Sched {
                 self.tasks[i].wake_at = 0;
                 self.tasks[i].state = State::Ready;
                 self.ready_push(i);
+                self.diagnostics.semaphore_timeouts =
+                    self.diagnostics.semaphore_timeouts.saturating_add(1);
             }
         }
     }
@@ -402,6 +535,29 @@ impl Sched {
 }
 
 static SCHED: Mutex<RefCell<Sched>> = Mutex::new(RefCell::new(Sched::new()));
+static INTERRUPT_DEPTH: Mutex<Cell<u16>> = Mutex::new(Cell::new(0));
+
+/// Marks entry into a target interrupt handler.
+///
+/// ISR-safe wakeups may make tasks ready, but task context switching is
+/// deferred until after interrupt exit.
+#[doc(hidden)]
+pub fn interrupt_enter() {
+    critical_section::with(|cs| {
+        let depth = INTERRUPT_DEPTH.borrow(cs);
+        depth.set(depth.get().saturating_add(1));
+    });
+}
+
+/// Marks exit from a target interrupt handler.
+#[doc(hidden)]
+pub fn interrupt_exit() {
+    critical_section::with(|cs| {
+        let depth = INTERRUPT_DEPTH.borrow(cs);
+        debug_assert!(depth.get() != 0);
+        depth.set(depth.get().saturating_sub(1));
+    });
+}
 
 fn reclaim_retired_stacks() {
     let (stacks, count) = critical_section::with(|cs| {
@@ -510,6 +666,7 @@ fn switch_to(prev: usize, next: usize) {
     }
     let (op, np) = critical_section::with(|cs| {
         let s = &mut *SCHED.borrow_ref_mut(cs);
+        s.diagnostics.context_switches = s.diagnostics.context_switches.saturating_add(1);
         s.tasks[next].state = State::Running;
         s.current = next;
         (
@@ -544,6 +701,7 @@ fn yield_now() {
     let now = now_ms();
     let target = critical_section::with(|cs| {
         let s = &mut *SCHED.borrow_ref_mut(cs);
+        s.diagnostics.yields = s.diagnostics.yields.saturating_add(1);
         s.wake_sleepers(now);
         let cur = s.current;
         // A cooperative yield promises progress to another ready task. Select
@@ -568,6 +726,7 @@ fn sleep_ms(ms: u32) {
     let wake_at = now_ms().saturating_add(ms as u64);
     let prev = critical_section::with(|cs| {
         let s = &mut *SCHED.borrow_ref_mut(cs);
+        s.diagnostics.sleeps = s.diagnostics.sleeps.saturating_add(1);
         let cur = s.current;
         s.tasks[cur].state = State::Sleeping;
         s.tasks[cur].wake_at = wake_at;
@@ -678,6 +837,7 @@ impl Semaphore {
                 false
             } else {
                 let cur = s.current;
+                s.diagnostics.semaphore_blocks = s.diagnostics.semaphore_blocks.saturating_add(1);
                 s.tasks[cur].state = State::Blocked;
                 s.tasks[cur].wake_at = 0;
                 s.tasks[cur].waiting_sem = self as *const Self as usize;
@@ -722,6 +882,7 @@ impl Semaphore {
                 return Some(NIL);
             }
             let cur = s.current;
+            s.diagnostics.semaphore_blocks = s.diagnostics.semaphore_blocks.saturating_add(1);
             s.tasks[cur].state = State::Blocked;
             s.tasks[cur].wake_at = deadline;
             s.tasks[cur].waiting_sem = self as *const Self as usize;
@@ -746,7 +907,7 @@ impl Semaphore {
 
     /// Release (V). Wakes one waiter if any, else increments the count.
     fn up(&self) {
-        critical_section::with(|cs| {
+        let preemption = critical_section::with(|cs| {
             let s = &mut *SCHED.borrow_ref_mut(cs);
             // SAFETY: exclusive under the critical section.
             let st = unsafe { &mut *self.inner.get() };
@@ -762,10 +923,19 @@ impl Semaphore {
                 s.tasks[w].sem_granted = true;
                 s.tasks[w].state = State::Ready;
                 s.ready_push(w);
+                s.diagnostics.semaphore_wakes = s.diagnostics.semaphore_wakes.saturating_add(1);
             } else {
                 st.count += 1;
             }
+            if INTERRUPT_DEPTH.borrow(cs).get() == 0 {
+                s.take_preemption_target()
+            } else {
+                None
+            }
         });
+        if let Some((current, next)) = preemption {
+            switch_to(current, next);
+        }
     }
 }
 
@@ -793,6 +963,16 @@ pub fn start(config: Config, resources: Resources) -> Result<(), StartError> {
     }
     init();
     Ok(())
+}
+
+/// Snapshot scheduler counters without changing task state or scheduling.
+pub fn diagnostics() -> Diagnostics {
+    critical_section::with(|cs| SCHED.borrow_ref(cs).diagnostics())
+}
+
+/// Copies scheduler slot state into `output` without changing scheduling.
+pub fn task_diagnostics(output: &mut [TaskDiagnostic]) -> usize {
+    critical_section::with(|cs| SCHED.borrow_ref(cs).task_diagnostics(output))
 }
 
 fn semaphore_from_handle(handle: SemaphoreHandle) -> &'static Semaphore {
@@ -863,7 +1043,25 @@ impl Runtime for HisiRuntime {
     }
 
     fn unlock_scheduler(&self) -> Result<(), DriverError> {
-        critical_section::with(|cs| SCHED.borrow_ref_mut(cs).unlock_current())
+        let preemption = critical_section::with(|cs| {
+            SCHED
+                .borrow_ref_mut(cs)
+                .unlock_current_and_take_preemption()
+        })?;
+        if let Some((current, next)) = preemption {
+            switch_to(current, next);
+        }
+        Ok(())
+    }
+
+    fn interrupt_enter(&self) -> Result<(), DriverError> {
+        crate::interrupt_enter();
+        Ok(())
+    }
+
+    fn interrupt_exit(&self) -> Result<(), DriverError> {
+        crate::interrupt_exit();
+        Ok(())
     }
 
     fn semaphore_create(&self, initial: u32) -> Result<SemaphoreHandle, DriverError> {
@@ -989,5 +1187,66 @@ mod tests {
         scheduler.unlock_current().unwrap();
         scheduler.unlock_current().unwrap();
         assert_eq!(scheduler.unlock_current(), Err(DriverError::InvalidContext));
+    }
+
+    #[test]
+    fn outermost_scheduler_unlock_releases_pending_higher_priority_task() {
+        let mut scheduler = Sched::new();
+        scheduler.priority_scheduling = true;
+        scheduler.tasks[0].state = State::Running;
+        scheduler.tasks[0].priority = 10;
+        ready_task(&mut scheduler, 1, 4);
+        scheduler.lock_current().unwrap();
+        scheduler.lock_current().unwrap();
+
+        assert_eq!(
+            scheduler.unlock_current_and_take_preemption().unwrap(),
+            None
+        );
+        assert_eq!(
+            scheduler.unlock_current_and_take_preemption().unwrap(),
+            Some((0, 1))
+        );
+        assert!(matches!(scheduler.tasks[0].state, State::Ready));
+    }
+
+    #[test]
+    fn forever_semaphore_wait_is_not_treated_as_an_expired_deadline() {
+        let semaphore = Semaphore::new(0);
+        let mut scheduler = Sched::new();
+        scheduler.tasks[1].state = State::Blocked;
+        scheduler.tasks[1].waiting_sem = core::ptr::addr_of!(semaphore) as usize;
+        scheduler.tasks[1].wake_at = 0;
+        unsafe {
+            (*semaphore.inner.get()).wait_head = 1;
+            (*semaphore.inner.get()).wait_tail = 1;
+        }
+
+        scheduler.wake_sleepers(1_000);
+
+        assert!(matches!(scheduler.tasks[1].state, State::Blocked));
+        assert_eq!(unsafe { (*semaphore.inner.get()).wait_head }, 1);
+        assert_eq!(scheduler.diagnostics.semaphore_timeouts, 0);
+    }
+
+    #[test]
+    fn timed_semaphore_wait_wakes_only_after_its_deadline() {
+        let semaphore = Semaphore::new(0);
+        let mut scheduler = Sched::new();
+        scheduler.tasks[1].state = State::Blocked;
+        scheduler.tasks[1].waiting_sem = core::ptr::addr_of!(semaphore) as usize;
+        scheduler.tasks[1].wake_at = 10;
+        unsafe {
+            (*semaphore.inner.get()).wait_head = 1;
+            (*semaphore.inner.get()).wait_tail = 1;
+        }
+
+        scheduler.wake_sleepers(9);
+        assert!(matches!(scheduler.tasks[1].state, State::Blocked));
+        scheduler.wake_sleepers(10);
+
+        assert!(matches!(scheduler.tasks[1].state, State::Ready));
+        assert_eq!(scheduler.ready_pop(), 1);
+        assert_eq!(scheduler.diagnostics.semaphore_timeouts, 1);
     }
 }
