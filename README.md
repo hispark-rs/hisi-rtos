@@ -9,5 +9,6 @@ scheduler while ownership moves out of the RF adapter. Exited stacks are
 reclaimed from another task, and task priorities are recorded through the
 runtime-neutral driver contract. `SchedulingPolicy::Cooperative` remains the
 default proven RF policy; priority selection is explicit and does not claim
-timer-driven preemption. TIMER/software-interrupt preemption and Embassy
-integration remain planned work.
+timer-driven preemption. Nested scheduler-lock state is tracked for the future
+preemption port; it has no hidden timing effect under the cooperative policy.
+TIMER/software-interrupt preemption and Embassy integration remain planned work.
