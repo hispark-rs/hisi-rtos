@@ -42,6 +42,23 @@ pub struct Resources {
     pub monotonic_ms: fn() -> u64,
 }
 
+/// Target timer and deferred-reschedule operations injected by the application.
+///
+/// The callbacks must not call user code. `arm_timer` receives a non-zero
+/// relative delay no greater than `max_timer_delay`; the RTOS chunks longer
+/// deadlines. The WS63 implementation uses TIMER_INT0 and SOFT_INT0.
+#[derive(Clone, Copy)]
+pub struct SchedulerPort {
+    /// Largest delay accepted by [`SchedulerPort::arm_timer`].
+    pub max_timer_delay: NonZeroU32,
+    /// Arms or replaces the one-shot scheduler timer.
+    pub arm_timer: fn(NonZeroU32),
+    /// Stops the scheduler timer when no deadline remains.
+    pub disarm_timer: fn(),
+    /// Pends the target's deferred-reschedule interrupt.
+    pub pend_reschedule: fn(),
+}
+
 /// Scheduler configuration fixed before the first task starts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Config {
@@ -49,6 +66,11 @@ pub struct Config {
     pub minimum_stack_size: NonZeroUsize,
     /// Ready-queue selection policy.
     pub scheduling: SchedulingPolicy,
+    /// Optional round-robin time slice for equal-priority ready tasks.
+    ///
+    /// Requires [`start_with_port`]; ignored by the compatibility [`start`]
+    /// entry point when no timer port is installed.
+    pub time_slice: Option<NonZeroU32>,
 }
 
 /// Scheduling policy selected before the runtime starts.
@@ -57,7 +79,8 @@ pub enum SchedulingPolicy {
     /// Explicit yield/block points use creation-order FIFO scheduling.
     Cooperative,
     /// Explicit scheduling points select the lowest numeric task priority.
-    /// This does not by itself enable timer-driven preemption.
+    /// Timer-driven preemption additionally requires a configured time slice
+    /// and [`start_with_port`].
     Priority,
 }
 
@@ -66,6 +89,9 @@ pub enum SchedulingPolicy {
 pub struct Diagnostics {
     pub context_switches: u32,
     pub irq_preemptions: u32,
+    pub timer_interrupts: u32,
+    pub software_interrupts: u32,
+    pub time_slice_preemptions: u32,
     pub yields: u32,
     pub sleeps: u32,
     pub sleeper_wakes: u32,
@@ -107,6 +133,9 @@ impl Diagnostics {
     const EMPTY: Self = Self {
         context_switches: 0,
         irq_preemptions: 0,
+        timer_interrupts: 0,
+        software_interrupts: 0,
+        time_slice_preemptions: 0,
         yields: 0,
         sleeps: 0,
         sleeper_wakes: 0,
@@ -128,6 +157,7 @@ impl Default for Config {
             // The WS63 vendor archive was built with a 24 KiB LiteOS default.
             minimum_stack_size: NonZeroUsize::new(24 * 1024).unwrap(),
             scheduling: SchedulingPolicy::Cooperative,
+            time_slice: None,
         }
     }
 }
@@ -145,6 +175,7 @@ pub enum StartError {
 struct StartState {
     config: Config,
     resources: Resources,
+    port: Option<SchedulerPort>,
 }
 
 static START_STATE: Mutex<Cell<Option<StartState>>> = Mutex::new(Cell::new(None));
@@ -166,30 +197,64 @@ fn deallocate(pointer: *mut u8) {
     unsafe { (start_state().resources.deallocate)(pointer) }
 }
 
-// ── Saved CPU context (offsets MUST match `context_switch` asm) ──────────────
-#[repr(C)]
+// Unified 272-byte task context. The field order matches the WS63 LiteOS
+// `TaskContext` ABI and the trap frames emitted by hisi-riscv-rt.
+#[repr(C, align(16))]
 #[derive(Clone, Copy)]
-struct Ctx {
-    ra: usize,      // 0
-    sp: usize,      // 4
-    s: [usize; 12], // 8..56  (s0..s11)
-    fs: [u32; 12],  // 56..104 (fs0..fs11, FLEN=32)
-    tp: usize,      // 104
-    mstatus: u32,   // 108
-    fcsr: u32,      // 112
+struct TaskContext {
+    mstatus: u32,          // 0
+    mepc: u32,             // 4
+    tp: u32,               // 8
+    sp: u32,               // 12
+    s: [u32; 12],          // 16..64: s11..s0
+    caller_gpr: [u32; 16], // 64..128: t6..t3,a7..a0,t2..t0,ra
+    f: [u32; 32],          // 128..256: fs11..fs0,ft11..ft0
+    fcsr: u32,             // 256
+    reserved: [u32; 3],    // 260..272
 }
-impl Ctx {
+impl TaskContext {
     const fn zero() -> Self {
-        Ctx {
-            ra: 0,
+        TaskContext {
+            mstatus: 0,
+            mepc: 0,
+            tp: 0,
             sp: 0,
             s: [0; 12],
-            fs: [0; 12],
-            tp: 0,
-            mstatus: 0,
+            caller_gpr: [0; 16],
+            f: [0; 32],
             fcsr: 0,
+            reserved: [0; 3],
         }
     }
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<TaskContext>() == 272);
+    assert!(core::mem::offset_of!(TaskContext, mstatus) == 0);
+    assert!(core::mem::offset_of!(TaskContext, mepc) == 4);
+    assert!(core::mem::offset_of!(TaskContext, s) == 16);
+    assert!(core::mem::offset_of!(TaskContext, caller_gpr) == 64);
+    assert!(core::mem::offset_of!(TaskContext, f) == 128);
+    assert!(core::mem::offset_of!(TaskContext, fcsr) == 256);
+};
+
+#[cfg(target_arch = "riscv32")]
+const TASK_CONTEXT_WORDS: usize = 68;
+
+#[cfg(target_arch = "riscv32")]
+unsafe fn initialize_irq_frame(top: usize, entry: usize, tp: usize, fcsr: u32) -> usize {
+    let frame = (top - TASK_CONTEXT_WORDS * core::mem::size_of::<u32>()) as *mut u32;
+    // SAFETY: the caller owns the allocated task stack through `Tcb::stack`,
+    // and `top` leaves at least the configured minimum stack size below it.
+    unsafe {
+        frame.write_bytes(0, TASK_CONTEXT_WORDS);
+        frame.add(0).write(0x7880);
+        frame.add(1).write(entry as u32);
+        frame.add(2).write(tp as u32);
+        frame.add(3).write(top as u32);
+        frame.add(64).write(fcsr);
+    }
+    frame as usize
 }
 
 /// Cooperative context switch: save callee-saved regs of the current task to
@@ -198,83 +263,125 @@ impl Ctx {
 /// (ra, sp, s0-s11, fs0-fs11) need saving.
 #[cfg(target_arch = "riscv32")]
 #[unsafe(naked)]
-unsafe extern "C" fn context_switch(old: *mut Ctx, new: *const Ctx) {
+unsafe extern "C" fn context_switch(old: *mut TaskContext, new: *const TaskContext) {
     core::arch::naked_asm!(
-        // Enable the F extension for the fsw/flw below (rv32imfc has it, but the
-        // inline-asm assembler context defaults to a baseline without F).
         ".option arch, +f",
-        // save current -> *old (a0)
-        "sw  ra,  0(a0)",
-        "sw  sp,  4(a0)",
-        "sw  s0,  8(a0)",
-        "sw  s1, 12(a0)",
-        "sw  s2, 16(a0)",
-        "sw  s3, 20(a0)",
-        "sw  s4, 24(a0)",
-        "sw  s5, 28(a0)",
-        "sw  s6, 32(a0)",
-        "sw  s7, 36(a0)",
-        "sw  s8, 40(a0)",
-        "sw  s9, 44(a0)",
-        "sw  s10,48(a0)",
-        "sw  s11,52(a0)",
-        "fsw fs0, 56(a0)",
-        "fsw fs1, 60(a0)",
-        "fsw fs2, 64(a0)",
-        "fsw fs3, 68(a0)",
-        "fsw fs4, 72(a0)",
-        "fsw fs5, 76(a0)",
-        "fsw fs6, 80(a0)",
-        "fsw fs7, 84(a0)",
-        "fsw fs8, 88(a0)",
-        "fsw fs9, 92(a0)",
-        "fsw fs10,96(a0)",
-        "fsw fs11,100(a0)",
-        "sw  tp, 104(a0)",
-        "csrr t0, mstatus",
-        "sw  t0, 108(a0)",
+        // Disable MIE and encode its prior value as MPIE for the eventual mret.
+        "li t1, 8",
+        "csrrc t0, mstatus, t1",
+        "andi t2, t0, 8",
+        "slli t2, t2, 4",
+        "li t1, -137",
+        "and t0, t0, t1",
+        "or t0, t0, t2",
+        "li t1, 0x1800",
+        "or t0, t0, t1",
+        "sw t0, 0(a0)",
+        "sw ra, 4(a0)",
+        "sw tp, 8(a0)",
+        "sw sp, 12(a0)",
+        "sw s11, 16(a0)",
+        "sw s10, 20(a0)",
+        "sw s9, 24(a0)",
+        "sw s8, 28(a0)",
+        "sw s7, 32(a0)",
+        "sw s6, 36(a0)",
+        "sw s5, 40(a0)",
+        "sw s4, 44(a0)",
+        "sw s3, 48(a0)",
+        "sw s2, 52(a0)",
+        "sw s1, 56(a0)",
+        "sw s0, 60(a0)",
+        "fsw fs11, 128(a0)",
+        "fsw fs10, 132(a0)",
+        "fsw fs9, 136(a0)",
+        "fsw fs8, 140(a0)",
+        "fsw fs7, 144(a0)",
+        "fsw fs6, 148(a0)",
+        "fsw fs5, 152(a0)",
+        "fsw fs4, 156(a0)",
+        "fsw fs3, 160(a0)",
+        "fsw fs2, 164(a0)",
+        "fsw fs1, 168(a0)",
+        "fsw fs0, 172(a0)",
         "frcsr t0",
-        "sw  t0, 112(a0)",
-        // restore *new (a1) -> current
-        "lw  ra,  0(a1)",
-        "lw  sp,  4(a1)",
-        "lw  s0,  8(a1)",
-        "lw  s1, 12(a1)",
-        "lw  s2, 16(a1)",
-        "lw  s3, 20(a1)",
-        "lw  s4, 24(a1)",
-        "lw  s5, 28(a1)",
-        "lw  s6, 32(a1)",
-        "lw  s7, 36(a1)",
-        "lw  s8, 40(a1)",
-        "lw  s9, 44(a1)",
-        "lw  s10,48(a1)",
-        "lw  s11,52(a1)",
-        "flw fs0, 56(a1)",
-        "flw fs1, 60(a1)",
-        "flw fs2, 64(a1)",
-        "flw fs3, 68(a1)",
-        "flw fs4, 72(a1)",
-        "flw fs5, 76(a1)",
-        "flw fs6, 80(a1)",
-        "flw fs7, 84(a1)",
-        "flw fs8, 88(a1)",
-        "flw fs9, 92(a1)",
-        "flw fs10,96(a1)",
-        "flw fs11,100(a1)",
-        "lw  tp, 104(a1)",
-        "lw  t0, 112(a1)",
-        "fscsr t0",
-        // Restore mstatus last: setting MIE before the remaining context is
-        // live would allow an interrupt to observe a half-restored task.
-        "lw  t0, 108(a1)",
-        "csrw mstatus, t0",
-        "ret",
+        "sw t0, 256(a0)",
+        // Restore the same complete ABI used by interrupt and fresh frames.
+        "mv t0, a1",
+        "lw t1, 0(t0)",
+        "csrw mstatus, t1",
+        "lw t1, 4(t0)",
+        "csrw mepc, t1",
+        "lw t1, 256(t0)",
+        "fscsr t1",
+        "flw fs11, 128(t0)",
+        "flw fs10, 132(t0)",
+        "flw fs9, 136(t0)",
+        "flw fs8, 140(t0)",
+        "flw fs7, 144(t0)",
+        "flw fs6, 148(t0)",
+        "flw fs5, 152(t0)",
+        "flw fs4, 156(t0)",
+        "flw fs3, 160(t0)",
+        "flw fs2, 164(t0)",
+        "flw fs1, 168(t0)",
+        "flw fs0, 172(t0)",
+        "flw ft11, 176(t0)",
+        "flw ft10, 180(t0)",
+        "flw ft9, 184(t0)",
+        "flw ft8, 188(t0)",
+        "flw fa7, 192(t0)",
+        "flw fa6, 196(t0)",
+        "flw fa5, 200(t0)",
+        "flw fa4, 204(t0)",
+        "flw fa3, 208(t0)",
+        "flw fa2, 212(t0)",
+        "flw fa1, 216(t0)",
+        "flw fa0, 220(t0)",
+        "flw ft7, 224(t0)",
+        "flw ft6, 228(t0)",
+        "flw ft5, 232(t0)",
+        "flw ft4, 236(t0)",
+        "flw ft3, 240(t0)",
+        "flw ft2, 244(t0)",
+        "flw ft1, 248(t0)",
+        "flw ft0, 252(t0)",
+        "lw tp, 8(t0)",
+        "lw s11, 16(t0)",
+        "lw s10, 20(t0)",
+        "lw s9, 24(t0)",
+        "lw s8, 28(t0)",
+        "lw s7, 32(t0)",
+        "lw s6, 36(t0)",
+        "lw s5, 40(t0)",
+        "lw s4, 44(t0)",
+        "lw s3, 48(t0)",
+        "lw s2, 52(t0)",
+        "lw s1, 56(t0)",
+        "lw s0, 60(t0)",
+        "lw t6, 64(t0)",
+        "lw t5, 68(t0)",
+        "lw t4, 72(t0)",
+        "lw t3, 76(t0)",
+        "lw a7, 80(t0)",
+        "lw a6, 84(t0)",
+        "lw a5, 88(t0)",
+        "lw a4, 92(t0)",
+        "lw a3, 96(t0)",
+        "lw a2, 100(t0)",
+        "lw a1, 104(t0)",
+        "lw a0, 108(t0)",
+        "lw t2, 112(t0)",
+        "lw t1, 116(t0)",
+        "lw ra, 124(t0)",
+        "lw sp, 12(t0)",
+        "lw t0, 120(t0)",
+        "mret",
     )
 }
 
 #[cfg(not(target_arch = "riscv32"))]
-unsafe extern "C" fn context_switch(_old: *mut Ctx, _new: *const Ctx) {
+unsafe extern "C" fn context_switch(_old: *mut TaskContext, _new: *const TaskContext) {
     unreachable!("WS63 context switching is only available on riscv32");
 }
 
@@ -291,7 +398,9 @@ enum State {
 type TaskFn = extern "C" fn(*mut c_void) -> *mut c_void;
 
 struct Tcb {
-    ctx: Ctx,
+    ctx: TaskContext,
+    saved_frame: usize,
+    resume_generation: u32,
     state: State,
     stack: usize, // heap allocation addr to free on exit (0 for the main task)
     entry: Option<TaskFn>,
@@ -306,7 +415,9 @@ struct Tcb {
 impl Tcb {
     const fn empty() -> Self {
         Tcb {
-            ctx: Ctx::zero(),
+            ctx: TaskContext::zero(),
+            saved_frame: 0,
+            resume_generation: 0,
             state: State::Free,
             stack: 0,
             entry: None,
@@ -329,6 +440,8 @@ struct Sched {
     retired_stacks: [usize; MAX_TASKS],
     retired_count: usize,
     priority_scheduling: bool,
+    time_slice_pending: bool,
+    forced_next: usize,
     started: bool,
     diagnostics: Diagnostics,
 }
@@ -343,6 +456,8 @@ impl Sched {
             retired_stacks: [0; MAX_TASKS],
             retired_count: 0,
             priority_scheduling: false,
+            time_slice_pending: false,
+            forced_next: NIL,
             started: false,
             diagnostics: Diagnostics::EMPTY,
         }
@@ -450,7 +565,7 @@ impl Sched {
         self.ready_push(current);
         Some(next)
     }
-    fn take_preemption_target(&mut self) -> Option<(usize, usize)> {
+    fn take_reschedule_target(&mut self, allow_equal_priority: bool) -> Option<(usize, usize)> {
         if !self.priority_scheduling {
             return None;
         }
@@ -461,7 +576,12 @@ impl Sched {
             return None;
         }
         let current_priority = self.tasks[current].priority as usize;
-        if !(0..current_priority).any(|priority| self.ready_head[priority] != NIL) {
+        let end = if allow_equal_priority {
+            current_priority.saturating_add(1)
+        } else {
+            current_priority
+        };
+        if !(0..end).any(|priority| self.ready_head[priority] != NIL) {
             return None;
         }
         let next = self.ready_pop();
@@ -471,16 +591,73 @@ impl Sched {
         Some((current, next))
     }
 
-    #[cfg(any(test, target_arch = "riscv32"))]
+    fn take_preemption_target(&mut self) -> Option<(usize, usize)> {
+        self.take_reschedule_target(false)
+    }
+
+    #[cfg(test)]
     fn take_irq_epilogue_target(&mut self, interrupt_depth: u16) -> Option<(usize, usize)> {
         if !self.started || interrupt_depth != 0 {
             return None;
         }
-        let target = self.take_preemption_target();
+        let time_slice = self.time_slice_pending;
+        let current_priority = self.tasks[self.current].priority;
+        let target = self.take_reschedule_target(time_slice);
         if target.is_some() {
             self.diagnostics.irq_preemptions = self.diagnostics.irq_preemptions.saturating_add(1);
+            if time_slice
+                && target.is_some_and(|(_, next)| self.tasks[next].priority == current_priority)
+            {
+                self.diagnostics.time_slice_preemptions =
+                    self.diagnostics.time_slice_preemptions.saturating_add(1);
+            }
+            self.time_slice_pending = false;
         }
         target
+    }
+
+    #[cfg(target_arch = "riscv32")]
+    fn schedule_from_trap(&mut self, frame: usize, interrupt_depth: u16) -> usize {
+        if !self.started || interrupt_depth != 0 {
+            return frame;
+        }
+
+        let current = self.current;
+        let current_priority = self.tasks[current].priority;
+        let time_slice = self.time_slice_pending;
+        let target = if self.forced_next != NIL {
+            let next = self.forced_next;
+            self.forced_next = NIL;
+            Some((current, next))
+        } else if self.tasks[current].state != State::Running {
+            let next = self.ready_pop();
+            (next != NIL).then_some((current, next))
+        } else {
+            self.take_reschedule_target(time_slice)
+        };
+
+        let Some((previous, next)) = target else {
+            return frame;
+        };
+
+        if self.tasks[previous].state != State::Free {
+            self.tasks[previous].saved_frame = frame;
+        }
+
+        let next_frame = self.tasks[next].saved_frame;
+        assert!(next_frame != 0, "target task has no saved trap frame");
+        self.tasks[next].saved_frame = 0;
+        self.tasks[next].state = State::Running;
+        self.tasks[next].resume_generation = self.tasks[next].resume_generation.wrapping_add(1);
+        self.current = next;
+        self.diagnostics.context_switches = self.diagnostics.context_switches.saturating_add(1);
+        self.diagnostics.irq_preemptions = self.diagnostics.irq_preemptions.saturating_add(1);
+        if time_slice && self.tasks[next].priority == current_priority {
+            self.diagnostics.time_slice_preemptions =
+                self.diagnostics.time_slice_preemptions.saturating_add(1);
+        }
+        self.time_slice_pending = false;
+        next_frame
     }
     fn retire_stack(&mut self, stack: usize) {
         if stack != 0 {
@@ -511,7 +688,11 @@ impl Sched {
         &mut self,
     ) -> Result<Option<(usize, usize)>, DriverError> {
         self.unlock_current()?;
-        Ok(self.take_preemption_target())
+        let target = self.take_reschedule_target(self.time_slice_pending);
+        if target.is_some() {
+            self.time_slice_pending = false;
+        }
+        Ok(target)
     }
     fn wake_sleepers(&mut self, now: u64) {
         for i in 0..MAX_TASKS {
@@ -543,6 +724,20 @@ impl Sched {
     fn alloc_slot(&mut self) -> Option<usize> {
         (0..MAX_TASKS).find(|&i| self.tasks[i].state == State::Free)
     }
+
+    fn earliest_wake_deadline(&self) -> Option<u64> {
+        self.tasks
+            .iter()
+            .filter(|task| {
+                matches!(task.state, State::Sleeping | State::Blocked) && task.wake_at != 0
+            })
+            .map(|task| task.wake_at)
+            .min()
+    }
+
+    fn has_ready_task(&self) -> bool {
+        self.ready_head.iter().any(|head| *head != NIL)
+    }
 }
 
 static SCHED: Mutex<RefCell<Sched>> = Mutex::new(RefCell::new(Sched::new()));
@@ -570,21 +765,19 @@ pub fn interrupt_exit() {
     });
 }
 
-/// Deferred scheduling point called by `hisi-riscv-rt` on the interrupted
-/// task's stack, after the IRQ stack is no longer active.
+/// Deferred scheduling point called by `hisi-riscv-rt` on its IRQ stack.
 ///
 /// The symbol deliberately remains private Rust API: the runtime assembly owns
 /// the ABI contract and provides a weak no-op when this crate is not linked.
 #[cfg(target_arch = "riscv32")]
 #[unsafe(no_mangle)]
-extern "C" fn __hisi_irq_epilogue() {
-    let target = critical_section::with(|cs| {
+extern "C" fn __hisi_irq_epilogue(encoded_frame: usize) -> usize {
+    critical_section::with(|cs| {
         let depth = INTERRUPT_DEPTH.borrow(cs).get();
-        SCHED.borrow_ref_mut(cs).take_irq_epilogue_target(depth)
-    });
-    if let Some((current, next)) = target {
-        switch_to(current, next);
-    }
+        SCHED
+            .borrow_ref_mut(cs)
+            .schedule_from_trap(encoded_frame, depth)
+    })
 }
 
 fn reclaim_retired_stacks() {
@@ -605,7 +798,81 @@ fn now_ms() -> u64 {
     (start_state().resources.monotonic_ms)()
 }
 
-/// First-run trampoline: a freshly switched-to task lands here (its `ctx.ra`),
+fn rearm_timer() {
+    let state = start_state();
+    let Some(port) = state.port else {
+        return;
+    };
+    let now = (state.resources.monotonic_ms)();
+    let (wake_deadline, has_ready_task) = critical_section::with(|cs| {
+        let scheduler = SCHED.borrow_ref(cs);
+        (
+            scheduler.earliest_wake_deadline(),
+            scheduler.has_ready_task(),
+        )
+    });
+    let slice_deadline = state
+        .config
+        .time_slice
+        .filter(|_| has_ready_task)
+        .map(|slice| now.saturating_add(slice.get() as u64));
+    let deadline = match (wake_deadline, slice_deadline) {
+        (Some(wake), Some(slice)) => Some(wake.min(slice)),
+        (Some(wake), None) => Some(wake),
+        (None, Some(slice)) => Some(slice),
+        (None, None) => None,
+    };
+    let Some(deadline) = deadline else {
+        (port.disarm_timer)();
+        return;
+    };
+    let remaining = deadline.saturating_sub(now).max(1);
+    let delay = remaining.min(port.max_timer_delay.get() as u64) as u32;
+    (port.arm_timer)(NonZeroU32::new(delay).unwrap());
+}
+
+/// Handles expiry of the injected scheduler timer.
+///
+/// The target handler must acknowledge its hardware source, call
+/// [`interrupt_enter`], invoke this function, then call [`interrupt_exit`]. The
+/// runtime epilogue performs any resulting context switch on the interrupted
+/// task's stack.
+pub fn on_timer_interrupt() {
+    let now = now_ms();
+    let time_slice_enabled = start_state().config.time_slice.is_some();
+    critical_section::with(|cs| {
+        let scheduler = &mut *SCHED.borrow_ref_mut(cs);
+        scheduler.diagnostics.timer_interrupts =
+            scheduler.diagnostics.timer_interrupts.saturating_add(1);
+        scheduler.wake_sleepers(now);
+        if time_slice_enabled {
+            scheduler.time_slice_pending = true;
+        }
+    });
+    rearm_timer();
+}
+
+/// Records delivery of the injected deferred-reschedule interrupt.
+///
+/// The target handler clears its hardware source and brackets this call with
+/// [`interrupt_enter`] / [`interrupt_exit`]. Scheduling remains in the runtime
+/// IRQ epilogue.
+pub fn on_software_interrupt() {
+    critical_section::with(|cs| {
+        let scheduler = &mut *SCHED.borrow_ref_mut(cs);
+        scheduler.diagnostics.software_interrupts =
+            scheduler.diagnostics.software_interrupts.saturating_add(1);
+    });
+}
+
+/// Requests an immediate deferred scheduling point through the target port.
+pub fn request_reschedule() {
+    if let Some(port) = start_state().port {
+        (port.pend_reschedule)();
+    }
+}
+
+/// First-run trampoline: a freshly restored task lands here (`ctx.mepc`),
 /// runs its entry, then exits. Reads its own entry/arg from the current TCB.
 extern "C" fn trampoline() -> ! {
     let (_slot, entry, arg, _stack) = critical_section::with(|cs| {
@@ -644,29 +911,44 @@ fn spawn(entry: TaskFn, arg: *mut c_void, stack_size: usize, priority: u8) -> Op
     if stack.is_null() {
         return None;
     }
+    #[cfg(target_arch = "riscv32")]
+    let trap_scheduling = start_state().port.is_some();
     // 16-byte aligned stack top.
     let top = (stack as usize + size) & !0xf;
+    #[cfg(target_arch = "riscv32")]
+    let (initial_tp, initial_fcsr): (usize, u32) = unsafe {
+        let (tp, fcsr);
+        core::arch::asm!(
+            "mv {tp}, tp",
+            "frcsr {fcsr}",
+            tp = out(reg) tp,
+            fcsr = out(reg) fcsr,
+            options(nomem, nostack),
+        );
+        (tp, fcsr)
+    };
     let slot = critical_section::with(|cs| {
         let s = &mut *SCHED.borrow_ref_mut(cs);
         let i = s.alloc_slot()?;
         let t = &mut s.tasks[i];
-        t.ctx = Ctx::zero();
+        t.ctx = TaskContext::zero();
         #[cfg(target_arch = "riscv32")]
-        unsafe {
-            core::arch::asm!(
-                "mv {tp}, tp",
-                "csrr {mstatus}, mstatus",
-                "frcsr {fcsr}",
-                tp = out(reg) t.ctx.tp,
-                mstatus = out(reg) t.ctx.mstatus,
-                fcsr = out(reg) t.ctx.fcsr,
-                options(nomem, nostack),
-            );
+        {
+            t.ctx.tp = initial_tp as u32;
+            t.ctx.mstatus = 0x7880;
+            t.ctx.fcsr = initial_fcsr;
         }
         // Cast through a fn pointer (not a direct fn-item->int cast).
         let tramp: extern "C" fn() -> ! = trampoline;
-        t.ctx.ra = tramp as usize;
-        t.ctx.sp = top;
+        t.ctx.mepc = tramp as usize as u32;
+        t.ctx.sp = top as u32;
+        #[cfg(target_arch = "riscv32")]
+        if trap_scheduling {
+            // SAFETY: `stack..top` is this task's freshly allocated stack and
+            // no task can observe it until the TCB is queued below.
+            t.saved_frame =
+                unsafe { initialize_irq_frame(top, tramp as usize, initial_tp, initial_fcsr) };
+        }
         t.state = State::Ready;
         t.stack = stack as usize;
         t.entry = Some(entry);
@@ -678,6 +960,8 @@ fn spawn(entry: TaskFn, arg: *mut c_void, stack_size: usize, priority: u8) -> Op
     });
     if slot.is_none() {
         deallocate(stack);
+    } else {
+        rearm_timer();
     }
     slot
 }
@@ -690,7 +974,33 @@ fn switch_to(prev: usize, next: usize) {
         critical_section::with(|cs| {
             SCHED.borrow_ref_mut(cs).tasks[next].state = State::Running;
         });
+        rearm_timer();
         return;
+    }
+    if let Some(port) = start_state().port {
+        let generation = critical_section::with(|cs| {
+            let s = &mut *SCHED.borrow_ref_mut(cs);
+            assert_eq!(s.current, prev, "switch source is not the running task");
+            assert_eq!(s.forced_next, NIL, "a trap switch is already pending");
+            assert!(
+                s.tasks[next].saved_frame != 0,
+                "target task has no trap frame"
+            );
+            s.forced_next = next;
+            s.tasks[prev].resume_generation
+        });
+        rearm_timer();
+        (port.pend_reschedule)();
+        loop {
+            let resumed = critical_section::with(|cs| {
+                let s = SCHED.borrow_ref(cs);
+                s.current == prev && s.tasks[prev].resume_generation != generation
+            });
+            if resumed {
+                return;
+            }
+            core::hint::spin_loop();
+        }
     }
     let (op, np) = critical_section::with(|cs| {
         let s = &mut *SCHED.borrow_ref_mut(cs);
@@ -702,6 +1012,7 @@ fn switch_to(prev: usize, next: usize) {
             core::ptr::addr_of!(s.tasks[next].ctx),
         )
     });
+    rearm_timer();
     // SAFETY: contexts live in the static SCHED (stable address); single-hart,
     // and the lock is released so the resumed task can re-enter the scheduler.
     unsafe { context_switch(op, np) };
@@ -709,6 +1020,14 @@ fn switch_to(prev: usize, next: usize) {
 
 fn switch_away(prev: usize) {
     loop {
+        if start_state().port.is_some()
+            && critical_section::with(|cs| {
+                let s = SCHED.borrow_ref(cs);
+                s.current == prev && s.tasks[prev].state == State::Running
+            })
+        {
+            return;
+        }
         let now = now_ms();
         let next = critical_section::with(|cs| {
             let s = &mut *SCHED.borrow_ref_mut(cs);
@@ -760,6 +1079,7 @@ fn sleep_ms(ms: u32) {
         s.tasks[cur].wake_at = wake_at;
         cur
     });
+    rearm_timer();
     switch_away(prev);
     reclaim_retired_stacks();
 }
@@ -918,6 +1238,9 @@ impl Semaphore {
             enqueue_waiter(s, st, cur);
             Some(cur)
         });
+        if matches!(current, Some(slot) if slot != NIL) {
+            rearm_timer();
+        }
         match current {
             None => true,
             Some(NIL) => false,
@@ -964,6 +1287,7 @@ impl Semaphore {
         if let Some((current, next)) = preemption {
             switch_to(current, next);
         }
+        rearm_timer();
     }
 }
 
@@ -973,12 +1297,33 @@ static RUNTIME: HisiRuntime = HisiRuntime;
 
 /// Starts the scheduler and installs it as the firmware's sole radio runtime.
 pub fn start(config: Config, resources: Resources) -> Result<(), StartError> {
+    start_inner(config, resources, None)
+}
+
+/// Starts the scheduler with a target timer and deferred-reschedule port.
+pub fn start_with_port(
+    config: Config,
+    resources: Resources,
+    port: SchedulerPort,
+) -> Result<(), StartError> {
+    start_inner(config, resources, Some(port))
+}
+
+fn start_inner(
+    config: Config,
+    resources: Resources,
+    port: Option<SchedulerPort>,
+) -> Result<(), StartError> {
     let already_started = critical_section::with(|cs| {
         let state = START_STATE.borrow(cs);
         if state.get().is_some() {
             true
         } else {
-            state.set(Some(StartState { config, resources }));
+            state.set(Some(StartState {
+                config,
+                resources,
+                port,
+            }));
             false
         }
     });
@@ -990,6 +1335,7 @@ pub fn start(config: Config, resources: Resources) -> Result<(), StartError> {
         return Err(StartError::Driver(error));
     }
     init();
+    rearm_timer();
     Ok(())
 }
 
@@ -1264,6 +1610,55 @@ mod tests {
         scheduler.started = true;
         assert_eq!(scheduler.take_irq_epilogue_target(0), None);
         assert_eq!(scheduler.diagnostics.irq_preemptions, 0);
+    }
+
+    #[test]
+    fn expired_time_slice_round_robins_equal_priority_tasks() {
+        let mut scheduler = Sched::new();
+        scheduler.started = true;
+        scheduler.priority_scheduling = true;
+        scheduler.tasks[0].state = State::Running;
+        scheduler.tasks[0].priority = 4;
+        ready_task(&mut scheduler, 1, 4);
+
+        assert_eq!(scheduler.take_irq_epilogue_target(0), None);
+        scheduler.time_slice_pending = true;
+        assert_eq!(scheduler.take_irq_epilogue_target(0), Some((0, 1)));
+        assert_eq!(scheduler.diagnostics.time_slice_preemptions, 1);
+        assert!(!scheduler.time_slice_pending);
+    }
+
+    #[test]
+    fn scheduler_lock_preserves_expired_time_slice_until_unlock() {
+        let mut scheduler = Sched::new();
+        scheduler.started = true;
+        scheduler.priority_scheduling = true;
+        scheduler.tasks[0].state = State::Running;
+        scheduler.tasks[0].priority = 4;
+        ready_task(&mut scheduler, 1, 4);
+        scheduler.time_slice_pending = true;
+        scheduler.lock_current().unwrap();
+
+        assert_eq!(scheduler.take_irq_epilogue_target(0), None);
+        assert!(scheduler.time_slice_pending);
+        assert_eq!(
+            scheduler.unlock_current_and_take_preemption().unwrap(),
+            Some((0, 1))
+        );
+        assert!(!scheduler.time_slice_pending);
+    }
+
+    #[test]
+    fn earliest_deadline_ignores_forever_waiters() {
+        let mut scheduler = Sched::new();
+        scheduler.tasks[1].state = State::Blocked;
+        scheduler.tasks[1].wake_at = 0;
+        scheduler.tasks[2].state = State::Sleeping;
+        scheduler.tasks[2].wake_at = 42;
+        scheduler.tasks[3].state = State::Blocked;
+        scheduler.tasks[3].wake_at = 17;
+
+        assert_eq!(scheduler.earliest_wake_deadline(), Some(17));
     }
 
     #[test]
