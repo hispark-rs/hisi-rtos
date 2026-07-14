@@ -5,13 +5,19 @@ Applications inject allocation and monotonic-time resources, then start exactly
 one runtime before initializing radio firmware.
 
 The single-hart backend supports cooperative and priority scheduling. Under
-`SchedulingPolicy::Priority`, an IRQ that wakes a higher-priority task defers
-the context switch until the runtime has restored the interrupted task's stack;
-the switch never occurs on the shared IRQ stack. The WS63 connectivity image
-exercises this path through init, scan, WPA2 association, DHCP, ARP, and ping.
+`SchedulingPolicy::Priority`, TIMER and software interrupts drive deferred
+preemption through the runtime's unified 272-byte task/trap frame. Interrupt
+handlers acknowledge, record, and wake; the common trap epilogue selects the
+next task and restores it with `mret`.
 
 `Config::default()` remains cooperative for compatibility, so priority behavior
 is an explicit application choice. Exited stacks are reclaimed by another task,
 and nested scheduler locks suppress preemption until the outermost unlock.
-TIMER/software-interrupt time slicing, priority inheritance, and Embassy
-integration remain planned work.
+Recursive mutexes use priority-ordered waiters, direct handoff, timeout cleanup,
+and transitive priority inheritance. Embassy executor/time integration remains
+planned work; peripheral async traits stay in `hisi-hal`.
+
+Vendor LiteOS is a behavior and disassembly oracle for the WS63 blob ABI, not a
+backend or dependency of this crate. `hisi-rtos` is the sole maintained native
+runtime; the WS63 compatibility adapter maps only the symbols actually required
+by a versioned radio archive onto `hisi-rf-rtos-driver` capabilities.

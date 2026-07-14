@@ -21,7 +21,8 @@ use core::ffi::c_void;
 use core::num::{NonZeroU32, NonZeroUsize};
 use critical_section::Mutex;
 use hisi_rf_rtos_driver::{
-    Error as DriverError, Runtime, SemaphoreHandle, TaskConfig, TaskId, WaitOutcome, WaitTimeout,
+    Error as DriverError, MutexHandle, Runtime, SemaphoreHandle, TaskConfig, TaskId, WaitOutcome,
+    WaitTimeout,
 };
 
 /// Max concurrent tasks (slot table; the WiFi stack uses only a few).
@@ -92,6 +93,7 @@ pub struct Diagnostics {
     pub timer_interrupts: u32,
     pub software_interrupts: u32,
     pub time_slice_preemptions: u32,
+    pub priority_inheritances: u32,
     pub yields: u32,
     pub sleeps: u32,
     pub sleeper_wakes: u32,
@@ -124,7 +126,10 @@ pub struct TaskDiagnostic {
     pub state: TaskState,
     pub entry: usize,
     pub waiting_sem: usize,
+    pub waiting_mutex: usize,
     pub wake_at: u64,
+    pub base_priority: u8,
+    /// Effective priority after inheritance (lower value is higher priority).
     pub priority: u8,
     pub scheduler_lock_depth: u16,
 }
@@ -136,6 +141,7 @@ impl Diagnostics {
         timer_interrupts: 0,
         software_interrupts: 0,
         time_slice_preemptions: 0,
+        priority_inheritances: 0,
         yields: 0,
         sleeps: 0,
         sleeper_wakes: 0,
@@ -385,7 +391,7 @@ unsafe extern "C" fn context_switch(_old: *mut TaskContext, _new: *const TaskCon
     unreachable!("WS63 context switching is only available on riscv32");
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
     Free,
     Ready,
@@ -408,8 +414,11 @@ struct Tcb {
     next: usize,  // intrusive link: ready queue OR one wait queue
     wake_at: u64, // mask-ROM systick millisecond deadline
     waiting_sem: usize,
+    waiting_mutex: usize,
     sem_granted: bool,
+    base_priority: u8,
     priority: u8,
+    inherited_waiters: [u8; PRIORITY_LEVELS],
     scheduler_lock_depth: u16,
 }
 impl Tcb {
@@ -425,8 +434,11 @@ impl Tcb {
             next: NIL,
             wake_at: 0,
             waiting_sem: 0,
+            waiting_mutex: 0,
             sem_granted: false,
+            base_priority: (PRIORITY_LEVELS - 1) as u8,
             priority: (PRIORITY_LEVELS - 1) as u8,
+            inherited_waiters: [0; PRIORITY_LEVELS],
             scheduler_lock_depth: 0,
         }
     }
@@ -495,7 +507,9 @@ impl Sched {
                 },
                 entry: task.entry.map_or(0, |entry| entry as usize),
                 waiting_sem: task.waiting_sem,
+                waiting_mutex: task.waiting_mutex,
                 wake_at: task.wake_at,
+                base_priority: task.base_priority,
                 priority: task.priority,
                 scheduler_lock_depth: task.scheduler_lock_depth,
             };
@@ -555,6 +569,74 @@ impl Sched {
             previous = current;
             current = self.tasks[current].next;
         }
+    }
+
+    fn set_effective_priority(&mut self, task: usize, priority: u8) {
+        if self.tasks[task].priority == priority {
+            return;
+        }
+        let ready = self.tasks[task].state == State::Ready;
+        if ready {
+            self.ready_remove(task);
+        }
+        self.tasks[task].priority = priority;
+        if ready {
+            self.ready_push(task);
+        }
+    }
+
+    fn refresh_inherited_priority(&mut self, task: usize, depth: usize) {
+        assert!(depth < MAX_TASKS, "mutex inheritance cycle");
+        let old = self.tasks[task].priority;
+        let inherited = self.tasks[task]
+            .inherited_waiters
+            .iter()
+            .position(|count| *count != 0)
+            .map_or(self.tasks[task].base_priority, |priority| priority as u8);
+        let new = self.tasks[task].base_priority.min(inherited);
+        if old == new {
+            return;
+        }
+        self.set_effective_priority(task, new);
+
+        let waiting_mutex = self.tasks[task].waiting_mutex;
+        if waiting_mutex != 0 {
+            // SAFETY: a blocked task keeps its mutex alive; all mutation occurs
+            // under this scheduler critical section.
+            let state = unsafe { &mut *(*(waiting_mutex as *const RtosMutex)).inner.get() };
+            remove_mutex_waiter(self, state, task);
+            enqueue_mutex_waiter(self, state, task);
+            if state.owner != NIL {
+                self.replace_inheritance(state.owner, old, new, depth + 1);
+            }
+        }
+    }
+
+    fn replace_inheritance(&mut self, owner: usize, old: u8, new: u8, depth: usize) {
+        if old == new {
+            return;
+        }
+        let old_count = &mut self.tasks[owner].inherited_waiters[old as usize];
+        *old_count = old_count.checked_sub(1).expect("missing inherited waiter");
+        let new_count = &mut self.tasks[owner].inherited_waiters[new as usize];
+        *new_count = new_count
+            .checked_add(1)
+            .expect("too many inherited waiters");
+        self.refresh_inherited_priority(owner, depth);
+    }
+
+    fn add_inheritance(&mut self, owner: usize, priority: u8) {
+        let count = &mut self.tasks[owner].inherited_waiters[priority as usize];
+        *count = count.checked_add(1).expect("too many inherited waiters");
+        self.diagnostics.priority_inheritances =
+            self.diagnostics.priority_inheritances.saturating_add(1);
+        self.refresh_inherited_priority(owner, 0);
+    }
+
+    fn remove_inheritance(&mut self, owner: usize, priority: u8) {
+        let count = &mut self.tasks[owner].inherited_waiters[priority as usize];
+        *count = count.checked_sub(1).expect("missing inherited waiter");
+        self.refresh_inherited_priority(owner, 0);
     }
     fn take_yield_target(&mut self, current: usize) -> Option<usize> {
         let next = self.ready_pop();
@@ -718,6 +800,24 @@ impl Sched {
                 self.ready_push(i);
                 self.diagnostics.semaphore_timeouts =
                     self.diagnostics.semaphore_timeouts.saturating_add(1);
+            } else if self.tasks[i].state == State::Blocked
+                && self.tasks[i].waiting_mutex != 0
+                && self.tasks[i].wake_at != 0
+                && now >= self.tasks[i].wake_at
+            {
+                let mutex = self.tasks[i].waiting_mutex as *const RtosMutex;
+                // SAFETY: the waiter keeps the mutex alive and the scheduler
+                // critical section serializes its queue and owner state.
+                let state = unsafe { &mut *(*mutex).inner.get() };
+                remove_mutex_waiter(self, state, i);
+                if state.owner != NIL {
+                    self.remove_inheritance(state.owner, self.tasks[i].priority);
+                }
+                self.tasks[i].waiting_mutex = 0;
+                self.tasks[i].sem_granted = false;
+                self.tasks[i].wake_at = 0;
+                self.tasks[i].state = State::Ready;
+                self.ready_push(i);
             }
         }
     }
@@ -954,6 +1054,7 @@ fn spawn(entry: TaskFn, arg: *mut c_void, stack_size: usize, priority: u8) -> Op
         t.entry = Some(entry);
         t.arg = arg as usize;
         t.wake_at = 0;
+        t.base_priority = priority;
         t.priority = priority;
         s.ready_push(i);
         Some(i)
@@ -1291,6 +1392,217 @@ impl Semaphore {
     }
 }
 
+// Recursive mutex with priority-ordered waiters and priority inheritance.
+struct RtosMutex {
+    inner: UnsafeCell<MutexState>,
+}
+
+struct MutexState {
+    owner: usize,
+    depth: u32,
+    wait_head: usize,
+    wait_tail: usize,
+}
+
+// SAFETY: all state is accessed under the single-hart scheduler critical section.
+unsafe impl Sync for RtosMutex {}
+
+impl RtosMutex {
+    const fn new() -> Self {
+        Self {
+            inner: UnsafeCell::new(MutexState {
+                owner: NIL,
+                depth: 0,
+                wait_head: NIL,
+                wait_tail: NIL,
+            }),
+        }
+    }
+
+    fn lock(&self, timeout_ms: u32) -> Result<bool, DriverError> {
+        let deadline = now_ms().saturating_add(timeout_ms as u64);
+        let current = critical_section::with(|cs| {
+            let s = &mut *SCHED.borrow_ref_mut(cs);
+            let current = s.current;
+            // SAFETY: exclusive under the scheduler critical section.
+            let state = unsafe { &mut *self.inner.get() };
+            if state.owner == current {
+                state.depth = state.depth.checked_add(1).ok_or(DriverError::Runtime)?;
+                return Ok(None);
+            }
+            if state.owner == NIL {
+                state.owner = current;
+                state.depth = 1;
+                return Ok(None);
+            }
+            if timeout_ms == 0 {
+                return Ok(Some(NIL));
+            }
+            if mutex_chain_contains(s, state.owner, current) {
+                return Err(DriverError::InvalidContext);
+            }
+
+            let owner = state.owner;
+            s.tasks[current].state = State::Blocked;
+            s.tasks[current].wake_at = if timeout_ms == u32::MAX { 0 } else { deadline };
+            s.tasks[current].waiting_mutex = self as *const Self as usize;
+            s.tasks[current].sem_granted = false;
+            enqueue_mutex_waiter(s, state, current);
+            s.add_inheritance(owner, s.tasks[current].priority);
+            Ok(Some(current))
+        })?;
+
+        if matches!(current, Some(slot) if slot != NIL) {
+            rearm_timer();
+        }
+        match current {
+            None => Ok(true),
+            Some(NIL) => Ok(false),
+            Some(current) => {
+                switch_away(current);
+                Ok(critical_section::with(|cs| {
+                    let s = &mut *SCHED.borrow_ref_mut(cs);
+                    let granted = s.tasks[s.current].sem_granted;
+                    s.tasks[s.current].sem_granted = false;
+                    granted
+                }))
+            }
+        }
+    }
+
+    fn unlock(&self) -> Result<(), DriverError> {
+        let preemption = critical_section::with(|cs| {
+            let s = &mut *SCHED.borrow_ref_mut(cs);
+            let current = s.current;
+            // SAFETY: exclusive under the scheduler critical section.
+            let state = unsafe { &mut *self.inner.get() };
+            if state.owner != current || state.depth == 0 {
+                return Err(DriverError::InvalidContext);
+            }
+            state.depth -= 1;
+            if state.depth != 0 {
+                return Ok(None);
+            }
+            release_mutex_locked(s, state, current);
+
+            Ok(if INTERRUPT_DEPTH.borrow(cs).get() == 0 {
+                s.take_preemption_target()
+            } else {
+                None
+            })
+        })?;
+        if let Some((current, next)) = preemption {
+            switch_to(current, next);
+        }
+        rearm_timer();
+        Ok(())
+    }
+}
+
+fn release_mutex_locked(sched: &mut Sched, state: &mut MutexState, owner: usize) {
+    let next = pop_mutex_waiter(sched, state);
+    if next == NIL {
+        state.owner = NIL;
+        return;
+    }
+
+    // Every waiter donated to the old owner. Remove those contributions before
+    // changing ownership, including the waiter receiving the direct handoff.
+    sched.remove_inheritance(owner, sched.tasks[next].priority);
+    let mut waiter = state.wait_head;
+    while waiter != NIL {
+        sched.remove_inheritance(owner, sched.tasks[waiter].priority);
+        waiter = sched.tasks[waiter].next;
+    }
+
+    state.owner = next;
+    state.depth = 1;
+    sched.tasks[next].waiting_mutex = 0;
+    sched.tasks[next].wake_at = 0;
+    sched.tasks[next].sem_granted = true;
+    sched.tasks[next].state = State::Ready;
+    sched.ready_push(next);
+
+    // Remaining waiters now donate to the new owner.
+    waiter = state.wait_head;
+    while waiter != NIL {
+        sched.add_inheritance(next, sched.tasks[waiter].priority);
+        waiter = sched.tasks[waiter].next;
+    }
+}
+
+fn enqueue_mutex_waiter(sched: &mut Sched, state: &mut MutexState, task: usize) {
+    let priority = sched.tasks[task].priority;
+    let mut previous = NIL;
+    let mut current = state.wait_head;
+    while current != NIL && sched.tasks[current].priority <= priority {
+        previous = current;
+        current = sched.tasks[current].next;
+    }
+    sched.tasks[task].next = current;
+    if previous == NIL {
+        state.wait_head = task;
+    } else {
+        sched.tasks[previous].next = task;
+    }
+    if current == NIL {
+        state.wait_tail = task;
+    }
+}
+
+fn remove_mutex_waiter(sched: &mut Sched, state: &mut MutexState, task: usize) {
+    let mut previous = NIL;
+    let mut current = state.wait_head;
+    while current != NIL {
+        if current == task {
+            let next = sched.tasks[current].next;
+            if previous == NIL {
+                state.wait_head = next;
+            } else {
+                sched.tasks[previous].next = next;
+            }
+            if state.wait_tail == current {
+                state.wait_tail = previous;
+            }
+            sched.tasks[current].next = NIL;
+            return;
+        }
+        previous = current;
+        current = sched.tasks[current].next;
+    }
+}
+
+fn pop_mutex_waiter(sched: &mut Sched, state: &mut MutexState) -> usize {
+    let task = state.wait_head;
+    if task != NIL {
+        state.wait_head = sched.tasks[task].next;
+        if state.wait_head == NIL {
+            state.wait_tail = NIL;
+        }
+        sched.tasks[task].next = NIL;
+    }
+    task
+}
+
+fn mutex_chain_contains(sched: &Sched, mut owner: usize, sought: usize) -> bool {
+    for _ in 0..MAX_TASKS {
+        if owner == sought {
+            return true;
+        }
+        let waiting = sched.tasks[owner].waiting_mutex;
+        if waiting == 0 {
+            return false;
+        }
+        // SAFETY: a blocked task keeps the mutex alive under the scheduler lock.
+        let state = unsafe { &*(*(waiting as *const RtosMutex)).inner.get() };
+        if state.owner == NIL {
+            return false;
+        }
+        owner = state.owner;
+    }
+    true
+}
+
 struct HisiRuntime;
 
 static RUNTIME: HisiRuntime = HisiRuntime;
@@ -1357,6 +1669,12 @@ fn semaphore_from_handle(handle: SemaphoreHandle) -> &'static Semaphore {
     unsafe { &*pointer }
 }
 
+fn mutex_from_handle(handle: MutexHandle) -> &'static RtosMutex {
+    let pointer = handle.into_raw().get() as *const RtosMutex;
+    // SAFETY: this backend creates handles only from live RtosMutex allocations.
+    unsafe { &*pointer }
+}
+
 impl Runtime for HisiRuntime {
     fn spawn(
         &self,
@@ -1401,13 +1719,8 @@ impl Runtime for HisiRuntime {
             if tcb.state == State::Free {
                 return Err(DriverError::InvalidHandle);
             }
-            if tcb.state == State::Ready {
-                scheduler.ready_remove(slot);
-                scheduler.tasks[slot].priority = priority;
-                scheduler.ready_push(slot);
-            } else {
-                scheduler.tasks[slot].priority = priority;
-            }
+            scheduler.tasks[slot].base_priority = priority;
+            scheduler.refresh_inherited_priority(slot, 0);
             Ok(())
         })
     }
@@ -1474,6 +1787,49 @@ impl Runtime for HisiRuntime {
 
     unsafe fn semaphore_destroy(&self, semaphore: SemaphoreHandle) -> Result<(), DriverError> {
         deallocate(semaphore.into_raw().get() as *mut u8);
+        Ok(())
+    }
+
+    fn mutex_create(&self) -> Result<MutexHandle, DriverError> {
+        let pointer = allocate(core::mem::size_of::<RtosMutex>()) as *mut RtosMutex;
+        let raw = NonZeroUsize::new(pointer as usize).ok_or(DriverError::ResourceExhausted)?;
+        // SAFETY: the RF allocator guarantees size/alignment for RtosMutex.
+        unsafe { pointer.write(RtosMutex::new()) };
+        // SAFETY: raw identifies the live allocation until destroy.
+        Ok(unsafe { MutexHandle::from_raw(raw) })
+    }
+
+    fn mutex_lock(
+        &self,
+        mutex: MutexHandle,
+        timeout: WaitTimeout,
+    ) -> Result<WaitOutcome, DriverError> {
+        let timeout_ms = match timeout {
+            WaitTimeout::NoWait => 0,
+            WaitTimeout::Milliseconds(value) => value.get(),
+            WaitTimeout::Forever => u32::MAX,
+        };
+        Ok(if mutex_from_handle(mutex).lock(timeout_ms)? {
+            WaitOutcome::Acquired
+        } else {
+            WaitOutcome::TimedOut
+        })
+    }
+
+    fn mutex_unlock(&self, mutex: MutexHandle) -> Result<(), DriverError> {
+        mutex_from_handle(mutex).unlock()
+    }
+
+    unsafe fn mutex_destroy(&self, mutex: MutexHandle) -> Result<(), DriverError> {
+        let busy = critical_section::with(|_| {
+            // SAFETY: caller promises the handle is live during this check.
+            let state = unsafe { &*mutex_from_handle(mutex).inner.get() };
+            state.owner != NIL || state.wait_head != NIL
+        });
+        if busy {
+            return Err(DriverError::InvalidContext);
+        }
+        deallocate(mutex.into_raw().get() as *mut u8);
         Ok(())
     }
 }
@@ -1699,5 +2055,139 @@ mod tests {
         assert!(matches!(scheduler.tasks[1].state, State::Ready));
         assert_eq!(scheduler.ready_pop(), 1);
         assert_eq!(scheduler.diagnostics.semaphore_timeouts, 1);
+    }
+
+    #[test]
+    fn duplicate_mutex_waiters_keep_owner_inherited_until_both_leave() {
+        let mut scheduler = Sched::new();
+        scheduler.priority_scheduling = true;
+        scheduler.tasks[0].state = State::Running;
+        scheduler.tasks[0].base_priority = 20;
+        scheduler.tasks[0].priority = 20;
+
+        scheduler.add_inheritance(0, 2);
+        scheduler.add_inheritance(0, 2);
+        assert_eq!(scheduler.tasks[0].priority, 2);
+        scheduler.remove_inheritance(0, 2);
+        assert_eq!(scheduler.tasks[0].priority, 2);
+        scheduler.remove_inheritance(0, 2);
+        assert_eq!(scheduler.tasks[0].priority, 20);
+    }
+
+    #[test]
+    fn chained_mutex_inheritance_propagates_effective_priority() {
+        let mut scheduler = Sched::new();
+        scheduler.priority_scheduling = true;
+        let upstream = RtosMutex::new();
+        let downstream = RtosMutex::new();
+
+        scheduler.tasks[0].state = State::Blocked;
+        scheduler.tasks[0].base_priority = 20;
+        scheduler.tasks[0].priority = 20;
+        scheduler.tasks[0].waiting_mutex = core::ptr::addr_of!(upstream) as usize;
+        scheduler.tasks[1].state = State::Running;
+        scheduler.tasks[1].base_priority = 30;
+        scheduler.tasks[1].priority = 30;
+        unsafe {
+            (*upstream.inner.get()).owner = 1;
+            (*upstream.inner.get()).wait_head = 0;
+            (*upstream.inner.get()).wait_tail = 0;
+            (*downstream.inner.get()).owner = 0;
+        }
+        scheduler.add_inheritance(1, 20);
+
+        scheduler.add_inheritance(0, 2);
+        assert_eq!(scheduler.tasks[0].priority, 2);
+        assert_eq!(scheduler.tasks[1].priority, 2);
+
+        scheduler.remove_inheritance(0, 2);
+        assert_eq!(scheduler.tasks[0].priority, 20);
+        assert_eq!(scheduler.tasks[1].priority, 20);
+    }
+
+    #[test]
+    fn timed_out_mutex_waiter_restores_owner_priority() {
+        let mut scheduler = Sched::new();
+        scheduler.priority_scheduling = true;
+        let mutex = RtosMutex::new();
+        scheduler.tasks[0].state = State::Running;
+        scheduler.tasks[0].base_priority = 20;
+        scheduler.tasks[0].priority = 20;
+        scheduler.tasks[1].state = State::Blocked;
+        scheduler.tasks[1].base_priority = 2;
+        scheduler.tasks[1].priority = 2;
+        scheduler.tasks[1].waiting_mutex = core::ptr::addr_of!(mutex) as usize;
+        scheduler.tasks[1].wake_at = 10;
+        unsafe {
+            (*mutex.inner.get()).owner = 0;
+            (*mutex.inner.get()).depth = 1;
+            (*mutex.inner.get()).wait_head = 1;
+            (*mutex.inner.get()).wait_tail = 1;
+        }
+        scheduler.add_inheritance(0, 2);
+        assert_eq!(scheduler.tasks[0].priority, 2);
+
+        scheduler.wake_sleepers(10);
+        assert_eq!(scheduler.tasks[0].priority, 20);
+        assert_eq!(scheduler.tasks[1].state, State::Ready);
+        assert_eq!(scheduler.tasks[1].waiting_mutex, 0);
+        assert_eq!(unsafe { (*mutex.inner.get()).wait_head }, NIL);
+    }
+
+    #[test]
+    fn mutex_handoff_transfers_remaining_inheritance_to_new_owner() {
+        let mut scheduler = Sched::new();
+        scheduler.priority_scheduling = true;
+        let mutex = RtosMutex::new();
+
+        scheduler.tasks[0].state = State::Running;
+        scheduler.tasks[0].base_priority = 20;
+        scheduler.tasks[0].priority = 20;
+        scheduler.tasks[1].state = State::Blocked;
+        scheduler.tasks[1].base_priority = 2;
+        scheduler.tasks[1].priority = 2;
+        scheduler.tasks[1].waiting_mutex = core::ptr::addr_of!(mutex) as usize;
+        scheduler.tasks[2].state = State::Blocked;
+        scheduler.tasks[2].base_priority = 5;
+        scheduler.tasks[2].priority = 5;
+        scheduler.tasks[2].waiting_mutex = core::ptr::addr_of!(mutex) as usize;
+        unsafe {
+            let state = &mut *mutex.inner.get();
+            state.owner = 0;
+            state.depth = 0;
+            enqueue_mutex_waiter(&mut scheduler, state, 1);
+            enqueue_mutex_waiter(&mut scheduler, state, 2);
+        }
+        scheduler.add_inheritance(0, 2);
+        scheduler.add_inheritance(0, 5);
+
+        unsafe { release_mutex_locked(&mut scheduler, &mut *mutex.inner.get(), 0) };
+
+        let state = unsafe { &*mutex.inner.get() };
+        assert_eq!(state.owner, 1);
+        assert_eq!(state.wait_head, 2);
+        assert_eq!(scheduler.tasks[0].priority, 20);
+        assert_eq!(scheduler.tasks[1].priority, 2);
+        assert_eq!(scheduler.tasks[1].inherited_waiters[5], 1);
+        assert_eq!(scheduler.tasks[1].state, State::Ready);
+        assert!(scheduler.tasks[1].sem_granted);
+        assert_eq!(scheduler.tasks[1].waiting_mutex, 0);
+    }
+
+    #[test]
+    fn base_priority_change_preserves_and_then_restores_inheritance() {
+        let mut scheduler = Sched::new();
+        scheduler.priority_scheduling = true;
+        scheduler.tasks[0].state = State::Running;
+        scheduler.tasks[0].base_priority = 20;
+        scheduler.tasks[0].priority = 20;
+
+        scheduler.add_inheritance(0, 2);
+        scheduler.tasks[0].base_priority = 10;
+        scheduler.refresh_inherited_priority(0, 0);
+        assert_eq!(scheduler.tasks[0].priority, 2);
+
+        scheduler.remove_inheritance(0, 2);
+        assert_eq!(scheduler.tasks[0].priority, 10);
     }
 }
