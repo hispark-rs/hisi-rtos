@@ -13,6 +13,77 @@ pub(super) enum State {
 /// Task entry signature (matches the OSAL `osal_kthread_func`).
 pub(super) type TaskFn = extern "C" fn(*mut c_void) -> *mut c_void;
 
+const NO_TIMESTAMP: u64 = u64::MAX;
+
+pub(super) struct TaskMetrics {
+    pub(super) cpu_time_ms: u64,
+    pub(super) irq_time_ms: u64,
+    pub(super) dispatches: u32,
+    pub(super) budget_exhaustions: u32,
+    pub(super) max_continuous_run_ms: u64,
+    pub(super) max_ready_latency_ms: u64,
+    pub(super) scheduler_lock_entries: u32,
+    pub(super) max_scheduler_lock_ms: u64,
+    pub(super) irq_entries: u32,
+    pub(super) max_irq_span_ms: u64,
+    run_started_at: u64,
+    ready_since: u64,
+}
+
+impl TaskMetrics {
+    const fn empty() -> Self {
+        Self {
+            cpu_time_ms: 0,
+            irq_time_ms: 0,
+            dispatches: 0,
+            budget_exhaustions: 0,
+            max_continuous_run_ms: 0,
+            max_ready_latency_ms: 0,
+            scheduler_lock_entries: 0,
+            max_scheduler_lock_ms: 0,
+            irq_entries: 0,
+            max_irq_span_ms: 0,
+            run_started_at: NO_TIMESTAMP,
+            ready_since: NO_TIMESTAMP,
+        }
+    }
+
+    pub(super) fn on_ready(&mut self, now: u64) {
+        if self.ready_since == NO_TIMESTAMP {
+            self.ready_since = now;
+        }
+    }
+
+    pub(super) fn on_dispatch(&mut self, now: u64) {
+        if self.ready_since != NO_TIMESTAMP {
+            self.max_ready_latency_ms = self
+                .max_ready_latency_ms
+                .max(now.saturating_sub(self.ready_since));
+            self.ready_since = NO_TIMESTAMP;
+        }
+        self.run_started_at = now;
+        self.dispatches = self.dispatches.saturating_add(1);
+    }
+
+    pub(super) fn on_switch_out(&mut self, now: u64) {
+        if self.run_started_at == NO_TIMESTAMP {
+            return;
+        }
+        let elapsed = now.saturating_sub(self.run_started_at);
+        self.cpu_time_ms = self.cpu_time_ms.saturating_add(elapsed);
+        self.max_continuous_run_ms = self.max_continuous_run_ms.max(elapsed);
+        self.run_started_at = NO_TIMESTAMP;
+    }
+
+    fn running_elapsed(&self, now: u64) -> u64 {
+        if self.run_started_at != NO_TIMESTAMP {
+            now.saturating_sub(self.run_started_at)
+        } else {
+            0
+        }
+    }
+}
+
 pub(super) struct Tcb {
     pub(super) ctx: TaskContext,
     pub(super) saved_frame: usize,
@@ -34,6 +105,7 @@ pub(super) struct Tcb {
     pub(super) identity_generation: u16,
     pub(super) run_policy: RunPolicy,
     pub(super) budget: BudgetState,
+    pub(super) metrics: TaskMetrics,
 }
 impl Tcb {
     pub(super) const fn empty() -> Self {
@@ -58,7 +130,16 @@ impl Tcb {
             identity_generation: 0,
             run_policy: RunPolicy::Cooperative,
             budget: BudgetState::none(),
+            metrics: TaskMetrics::empty(),
         }
+    }
+
+    fn max_scheduler_lock_ms(&self, now: u64) -> u64 {
+        let current = self
+            .scheduler_lock_started_at
+            .map(|started_at| now.saturating_sub(started_at))
+            .unwrap_or(0);
+        self.metrics.max_scheduler_lock_ms.max(current)
     }
 }
 
@@ -75,6 +156,8 @@ pub(super) struct Sched {
     pub(super) forced_next: usize,
     pub(super) started: bool,
     pub(super) diagnostics: Diagnostics,
+    pub(super) irq_started_at: u64,
+    pub(super) irq_task: usize,
 }
 impl Sched {
     pub(super) const fn new() -> Self {
@@ -92,6 +175,8 @@ impl Sched {
             forced_next: NIL,
             started: false,
             diagnostics: Diagnostics::EMPTY,
+            irq_started_at: NO_TIMESTAMP,
+            irq_task: NIL,
         }
     }
 
@@ -122,7 +207,30 @@ impl Sched {
         snapshot
     }
 
-    pub(super) fn task_diagnostics(&self, output: &mut [TaskDiagnostic]) -> usize {
+    pub(super) fn interrupt_enter(&mut self, now: u64) {
+        debug_assert_eq!(self.irq_task, NIL);
+        self.irq_task = self.current;
+        self.irq_started_at = now;
+        self.tasks[self.current].metrics.irq_entries = self.tasks[self.current]
+            .metrics
+            .irq_entries
+            .saturating_add(1);
+    }
+
+    pub(super) fn interrupt_exit(&mut self, now: u64) {
+        if self.irq_task == NIL || self.irq_started_at == NO_TIMESTAMP {
+            return;
+        }
+        let task = self.irq_task;
+        let elapsed = now.saturating_sub(self.irq_started_at);
+        let metrics = &mut self.tasks[task].metrics;
+        metrics.irq_time_ms = metrics.irq_time_ms.saturating_add(elapsed);
+        metrics.max_irq_span_ms = metrics.max_irq_span_ms.max(elapsed);
+        self.irq_task = NIL;
+        self.irq_started_at = NO_TIMESTAMP;
+    }
+
+    pub(super) fn task_diagnostics(&self, output: &mut [TaskDiagnostic], now: u64) -> usize {
         let count = output.len().min(TASK_SLOT_COUNT);
         for (index, output) in output[..count].iter_mut().enumerate() {
             let task = &self.tasks[index];
@@ -147,6 +255,22 @@ impl Sched {
                 run_policy: task.run_policy,
                 budget_remaining: task.budget.remaining(),
                 budget_replenishes_at: task.budget.replenishes_at(),
+                cpu_time_ms: task
+                    .metrics
+                    .cpu_time_ms
+                    .saturating_add(task.metrics.running_elapsed(now)),
+                irq_time_ms: task.metrics.irq_time_ms,
+                dispatches: task.metrics.dispatches,
+                budget_exhaustions: task.metrics.budget_exhaustions,
+                max_continuous_run_ms: task
+                    .metrics
+                    .max_continuous_run_ms
+                    .max(task.metrics.running_elapsed(now)),
+                max_ready_latency_ms: task.metrics.max_ready_latency_ms,
+                scheduler_lock_entries: task.metrics.scheduler_lock_entries,
+                max_scheduler_lock_ms: task.max_scheduler_lock_ms(now),
+                irq_entries: task.metrics.irq_entries,
+                max_irq_span_ms: task.metrics.max_irq_span_ms,
             };
         }
         count
@@ -163,6 +287,12 @@ impl Sched {
             self.tasks[self.ready_tail[priority]].next = i;
         }
         self.ready_tail[priority] = i;
+    }
+
+    pub(super) fn make_ready(&mut self, task: usize, now: u64) {
+        self.tasks[task].state = State::Ready;
+        self.tasks[task].metrics.on_ready(now);
+        self.ready_push(task);
     }
     pub(super) fn ready_pop(&mut self) -> usize {
         for priority in 0..PRIORITY_LEVELS {
@@ -273,18 +403,18 @@ impl Sched {
         *count = count.checked_sub(1).expect("missing inherited waiter");
         self.refresh_inherited_priority(owner, 0);
     }
-    pub(super) fn take_yield_target(&mut self, current: usize) -> Option<usize> {
+    pub(super) fn take_yield_target(&mut self, current: usize, now: u64) -> Option<usize> {
         let next = self.ready_pop();
         if next == NIL {
             return None;
         }
-        self.tasks[current].state = State::Ready;
-        self.ready_push(current);
+        self.make_ready(current, now);
         Some(next)
     }
     pub(super) fn take_reschedule_target(
         &mut self,
         allow_equal_priority: bool,
+        now: u64,
     ) -> Option<(usize, usize)> {
         let current = self.current;
         if self.tasks[current].state != State::Running
@@ -304,19 +434,19 @@ impl Sched {
         }
         let next = self.ready_pop();
         debug_assert!(next != NIL);
-        self.tasks[current].state = State::Ready;
-        self.ready_push(current);
+        self.make_ready(current, now);
         Some((current, next))
     }
 
-    pub(super) fn take_preemption_target(&mut self) -> Option<(usize, usize)> {
-        self.take_reschedule_target(false)
+    pub(super) fn take_preemption_target(&mut self, now: u64) -> Option<(usize, usize)> {
+        self.take_reschedule_target(false, now)
     }
 
     #[cfg(test)]
     pub(super) fn take_irq_epilogue_target(
         &mut self,
         interrupt_depth: u16,
+        now: u64,
     ) -> Option<(usize, usize)> {
         if !self.started || interrupt_depth != 0 {
             return None;
@@ -326,7 +456,7 @@ impl Sched {
         let target = if self.tasks[self.current].state != State::Running {
             Some((self.current, self.ready_pop_or_idle()))
         } else {
-            self.take_reschedule_target(time_slice)
+            self.take_reschedule_target(time_slice, now)
         };
         if target.is_some() {
             self.diagnostics.irq_preemptions = self.diagnostics.irq_preemptions.saturating_add(1);
@@ -362,7 +492,7 @@ impl Sched {
         } else if self.tasks[current].state != State::Running {
             Some((current, self.ready_pop_or_idle()))
         } else {
-            self.take_reschedule_target(time_slice)
+            self.take_reschedule_target(time_slice, now)
         };
 
         let Some((previous, next)) = target else {
@@ -401,6 +531,8 @@ impl Sched {
         let task = &mut self.tasks[self.current];
         if task.scheduler_lock_depth == 0 {
             task.scheduler_lock_started_at = Some(now);
+            task.metrics.scheduler_lock_entries =
+                task.metrics.scheduler_lock_entries.saturating_add(1);
         }
         task.scheduler_lock_depth = task
             .scheduler_lock_depth
@@ -409,13 +541,20 @@ impl Sched {
         self.diagnostics.scheduler_locks = self.diagnostics.scheduler_locks.saturating_add(1);
         Ok(())
     }
-    pub(super) fn unlock_current(&mut self) -> Result<(), DriverError> {
+    pub(super) fn unlock_current(&mut self, now: u64) -> Result<(), DriverError> {
         let task = &mut self.tasks[self.current];
         if task.scheduler_lock_depth == 0 {
             return Err(DriverError::InvalidContext);
         }
         task.scheduler_lock_depth -= 1;
         if task.scheduler_lock_depth == 0 {
+            let started_at = task
+                .scheduler_lock_started_at
+                .expect("outermost scheduler lock has no start timestamp");
+            task.metrics.max_scheduler_lock_ms = task
+                .metrics
+                .max_scheduler_lock_ms
+                .max(now.saturating_sub(started_at));
             task.scheduler_lock_started_at = None;
         }
         Ok(())
@@ -425,7 +564,7 @@ impl Sched {
         &mut self,
         now: u64,
     ) -> Result<Option<(usize, usize)>, DriverError> {
-        self.unlock_current()?;
+        self.unlock_current(now)?;
         if self.tasks[self.current].scheduler_lock_depth == 0
             && self.tasks[self.current].budget.lock_overrun_pending()
         {
@@ -439,7 +578,7 @@ impl Sched {
             let next = self.ready_pop_or_idle();
             return Ok(Some((current, next)));
         }
-        let target = self.take_reschedule_target(self.time_slice_pending);
+        let target = self.take_reschedule_target(self.time_slice_pending, now);
         if target.is_some() {
             self.time_slice_pending = false;
         }
@@ -448,8 +587,7 @@ impl Sched {
     pub(super) fn wake_sleepers(&mut self, now: u64) {
         for i in 0..TASK_SLOT_COUNT {
             if self.tasks[i].state == State::Sleeping && now >= self.tasks[i].wake_at {
-                self.tasks[i].state = State::Ready;
-                self.ready_push(i);
+                self.make_ready(i, now);
                 self.diagnostics.sleeper_wakes = self.diagnostics.sleeper_wakes.saturating_add(1);
             } else if self.tasks[i].state == State::Blocked
                 && self.tasks[i].waiting_sem != 0
@@ -465,8 +603,7 @@ impl Sched {
                 self.tasks[i].waiting_sem = 0;
                 self.tasks[i].sem_granted = false;
                 self.tasks[i].wake_at = 0;
-                self.tasks[i].state = State::Ready;
-                self.ready_push(i);
+                self.make_ready(i, now);
                 self.diagnostics.semaphore_timeouts =
                     self.diagnostics.semaphore_timeouts.saturating_add(1);
             } else if self.tasks[i].state == State::Blocked
@@ -485,8 +622,7 @@ impl Sched {
                 self.tasks[i].waiting_mutex = 0;
                 self.tasks[i].sem_granted = false;
                 self.tasks[i].wake_at = 0;
-                self.tasks[i].state = State::Ready;
-                self.ready_push(i);
+                self.make_ready(i, now);
             }
         }
         self.replenish_budgets(now);
@@ -496,8 +632,7 @@ impl Sched {
         for i in 0..TASK_SLOT_COUNT {
             if self.tasks[i].state == State::Throttled && self.tasks[i].budget.replenish_if_due(now)
             {
-                self.tasks[i].state = State::Ready;
-                self.ready_push(i);
+                self.make_ready(i, now);
                 self.diagnostics.budget_replenishments =
                     self.diagnostics.budget_replenishments.saturating_add(1);
             }
@@ -518,12 +653,20 @@ impl Sched {
         match self.tasks[current].budget.on_timer(now, locked) {
             BudgetExpiry::ThrottleNow => {
                 self.tasks[current].state = State::Throttled;
+                self.tasks[current].metrics.budget_exhaustions = self.tasks[current]
+                    .metrics
+                    .budget_exhaustions
+                    .saturating_add(1);
                 self.diagnostics.budget_exhaustions =
                     self.diagnostics.budget_exhaustions.saturating_add(1);
                 self.diagnostics.budget_throttles =
                     self.diagnostics.budget_throttles.saturating_add(1);
             }
             BudgetExpiry::DeferredBySchedulerLock => {
+                self.tasks[current].metrics.budget_exhaustions = self.tasks[current]
+                    .metrics
+                    .budget_exhaustions
+                    .saturating_add(1);
                 self.diagnostics.budget_exhaustions =
                     self.diagnostics.budget_exhaustions.saturating_add(1);
                 self.diagnostics.budget_lock_overruns =
@@ -552,6 +695,8 @@ impl Sched {
     pub(super) fn account_switch(&mut self, previous: usize, next: usize, now: u64) {
         self.tasks[previous].budget.on_switch_out(now);
         self.tasks[next].budget.on_dispatch(now);
+        self.tasks[previous].metrics.on_switch_out(now);
+        self.tasks[next].metrics.on_dispatch(now);
         self.time_slice_deadline = 0;
     }
     pub(super) fn alloc_dynamic_slot(&mut self) -> Result<usize, DriverError> {
@@ -575,6 +720,7 @@ impl Sched {
             // The old budget no longer owns eligibility after a policy change.
             // A new Budgeted policy also starts with a fresh full budget.
             task.state = State::Ready;
+            task.metrics.on_ready(now);
         }
         if was_ready || was_throttled {
             self.ready_push(slot);

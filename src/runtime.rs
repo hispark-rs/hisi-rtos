@@ -127,8 +127,14 @@ static INTERRUPT_DEPTH: Mutex<Cell<u16>> = Mutex::new(Cell::new(0));
 /// deferred until after interrupt exit.
 #[doc(hidden)]
 pub fn interrupt_enter() {
+    let now = start_state_opt().map(|state| (state.resources.monotonic_ms)());
     critical_section::with(|cs| {
         let depth = INTERRUPT_DEPTH.borrow(cs);
+        if depth.get() == 0
+            && let Some(now) = now
+        {
+            SCHED.borrow_ref_mut(cs).interrupt_enter(now);
+        }
         depth.set(depth.get().saturating_add(1));
     });
 }
@@ -136,9 +142,15 @@ pub fn interrupt_enter() {
 /// Marks exit from a target interrupt handler.
 #[doc(hidden)]
 pub fn interrupt_exit() {
+    let now = start_state_opt().map(|state| (state.resources.monotonic_ms)());
     critical_section::with(|cs| {
         let depth = INTERRUPT_DEPTH.borrow(cs);
         debug_assert!(depth.get() != 0);
+        if depth.get() == 1
+            && let Some(now) = now
+        {
+            SCHED.borrow_ref_mut(cs).interrupt_exit(now);
+        }
         depth.set(depth.get().saturating_sub(1));
     });
 }
@@ -273,6 +285,7 @@ fn init() {
         s.tasks[0].run_policy = RunPolicy::Cooperative;
         s.tasks[0].budget = BudgetState::for_policy(RunPolicy::Cooperative, now);
         s.tasks[0].budget.on_dispatch(now);
+        s.tasks[0].metrics.on_dispatch(now);
         s.current = 0;
 
         let idle = &mut s.tasks[IDLE_SLOT];
@@ -303,6 +316,7 @@ fn init() {
         idle.identity_generation = 1;
         idle.run_policy = RunPolicy::Cooperative;
         idle.budget = BudgetState::none();
+        idle.metrics.on_ready(now);
         s.slot_generations[IDLE_SLOT] = 1;
         s.started = true;
     });
@@ -364,7 +378,6 @@ fn spawn(
             t.saved_frame =
                 unsafe { initialize_irq_frame(top, tramp as usize, initial_tp, initial_fcsr) };
         }
-        t.state = State::Ready;
         t.stack = stack as usize;
         t.entry = Some(entry);
         t.arg = arg as usize;
@@ -374,7 +387,7 @@ fn spawn(
         t.identity_generation = identity_generation;
         t.run_policy = run_policy;
         t.budget = BudgetState::for_policy(run_policy, now);
-        s.ready_push(i);
+        s.make_ready(i, now);
         Ok(i)
     });
     if slot.is_err() {
@@ -474,7 +487,7 @@ fn yield_now() -> Result<(), DriverError> {
         // that task before requeueing the current one; otherwise a strict
         // priority queue would immediately select the yielding high-priority
         // task again and starve lower-priority initialization work.
-        Ok(s.take_yield_target(cur).map(|next| (cur, next)))
+        Ok(s.take_yield_target(cur, now).map(|next| (cur, next)))
     })?;
     if let Some((prev, next)) = target {
         switch_to(prev, next);
@@ -637,7 +650,8 @@ pub fn diagnostics() -> Diagnostics {
 
 /// Copies scheduler slot state into `output` without changing scheduling.
 pub fn task_diagnostics(output: &mut [TaskDiagnostic]) -> usize {
-    critical_section::with(|cs| SCHED.borrow_ref(cs).task_diagnostics(output))
+    let now = now_ms();
+    critical_section::with(|cs| SCHED.borrow_ref(cs).task_diagnostics(output, now))
 }
 
 fn set_task_run_policy_inner(task: TaskId, policy: RunPolicy) -> Result<(), DriverError> {

@@ -3,62 +3,62 @@ normative_spec = "docs/spec/scheduling.md"
 
 [[requirement]]
 id = "RTOS-ID-001"
-implementation = ["src/lib.rs:encode_task_id", "src/lib.rs:decode_task_id"]
+implementation = ["src/runtime.rs:encode_task_id", "src/runtime.rs:decode_task_id"]
 host_tests = ["tests::task_identity_generation_rejects_stale_slot_handle"]
 kani = "NotApplicable: encoding is exhaustively covered over the current 17-slot table by host tests; stale live-slot mutation remains an integration test"
 
 [[requirement]]
 id = "RTOS-ID-002"
-implementation = ["src/lib.rs:TASK_SLOT_BITS", "src/lib.rs:encode_task_id", "src/lib.rs:decode_task_id"]
+implementation = ["src/runtime.rs:TASK_SLOT_BITS", "src/runtime.rs:encode_task_id", "src/runtime.rs:decode_task_id"]
 host_tests = ["tests::task_identity_generation_rejects_stale_slot_handle"]
 kani = "NotApplicable: compile-time table bound and boundary host tests cover the current fixed encoding"
 
 [[requirement]]
 id = "RTOS-STATE-001"
-implementation = ["src/lib.rs:State", "src/lib.rs:Tcb::next"]
+implementation = ["src/runtime/scheduler.rs:State", "src/runtime/scheduler.rs:Tcb::next"]
 host_tests = ["tests::timed_semaphore_wait_wakes_only_after_its_deadline", "tests::budget_exhaustion_removes_task_until_replenishment"]
 
 [[requirement]]
 id = "RTOS-STATE-002"
-implementation = ["src/lib.rs:Sched::current", "src/lib.rs:Sched::schedule_from_trap"]
+implementation = ["src/runtime/scheduler.rs:Sched::current", "src/runtime/scheduler.rs:Sched::schedule_from_trap"]
 host_tests = ["tests::irq_epilogue_preempts_only_after_outermost_interrupt_exit"]
 tla = "spec/SchedulerBudget.tla:OneRunning"
 
 [[requirement]]
 id = "RTOS-STATE-003"
-implementation = ["src/lib.rs:IDLE_SLOT", "src/lib.rs:DYNAMIC_TASK_CAPACITY", "src/lib.rs:Sched::alloc_dynamic_slot", "src/lib.rs:idle_entry"]
+implementation = ["src/runtime.rs:IDLE_SLOT", "src/config.rs:DYNAMIC_TASK_CAPACITY", "src/runtime/scheduler.rs:Sched::alloc_dynamic_slot", "src/runtime.rs:idle_entry"]
 host_tests = ["tests::dynamic_allocation_reserves_main_and_idle_slots", "tests::idle_is_selected_only_when_the_ready_queues_are_empty"]
 
 [[requirement]]
 id = "RTOS-SCHED-001"
-implementation = ["src/lib.rs:ready_push", "src/lib.rs:ready_pop", "src/lib.rs:take_yield_target"]
+implementation = ["src/runtime/scheduler.rs:ready_push", "src/runtime/scheduler.rs:ready_pop", "src/runtime/scheduler.rs:take_yield_target"]
 host_tests = ["tests::ready_queue_prefers_lower_priority_number_and_keeps_fifo", "tests::all_run_policies_use_effective_priority_then_fifo", "tests::cooperative_yield_hands_off_before_requeueing_higher_priority_task"]
 
 [[requirement]]
 id = "RTOS-SCHED-002"
-implementation = ["src/lib.rs:take_reschedule_target"]
+implementation = ["src/runtime/scheduler.rs:take_reschedule_target"]
 host_tests = ["tests::cooperative_task_is_not_preempted_by_irq_but_can_yield"]
 
 [[requirement]]
 id = "RTOS-SCHED-003"
-implementation = ["src/lib.rs:next_time_slice_deadline", "src/lib.rs:take_reschedule_target"]
+implementation = ["src/runtime/time.rs:next_time_slice_deadline", "src/runtime/scheduler.rs:take_reschedule_target"]
 host_tests = ["tests::expired_time_slice_round_robins_equal_priority_tasks", "tests::unrelated_deadline_rearm_does_not_postpone_time_slice"]
 hil = ["A3_RTOS_PREEMPTION_OK"]
 
 [[requirement]]
 id = "RTOS-SCHED-004"
-implementation = ["src/scheduling.rs:RunPolicy::Budgeted", "src/lib.rs:Sched::on_timer"]
+implementation = ["src/scheduling.rs:RunPolicy::Budgeted", "src/runtime/scheduler.rs:Sched::on_timer"]
 host_tests = ["tests::budget_exhaustion_removes_task_until_replenishment"]
 hil = ["A3_RTOS_BUDGET_OK"]
 
 [[requirement]]
 id = "RTOS-SCHED-005"
-implementation = ["src/lib.rs:Sched::set_run_policy"]
+implementation = ["src/runtime/scheduler.rs:Sched::set_run_policy"]
 host_tests = ["tests::policy_change_releases_a_throttled_task"]
 
 [[requirement]]
 id = "RTOS-BUDGET-001"
-implementation = ["src/scheduling.rs:BudgetState", "src/lib.rs:Sched::on_timer"]
+implementation = ["src/scheduling.rs:BudgetState", "src/runtime/scheduler.rs:Sched::on_timer"]
 host_tests = ["scheduling::tests::exhausted_budget_throttles_until_phase_aligned_replenishment", "tests::budget_exhaustion_removes_task_until_replenishment"]
 kani = "scheduling::proofs::remaining_never_exceeds_capacity"
 tla = "spec/SchedulerBudget.tla:BudgetBound"
@@ -71,7 +71,7 @@ host_tests = ["scheduling::tests::switch_out_preserves_unused_budget"]
 
 [[requirement]]
 id = "RTOS-BUDGET-003"
-implementation = ["src/lib.rs:Sched::on_timer", "src/lib.rs:Sched::replenish_budgets"]
+implementation = ["src/runtime/scheduler.rs:Sched::on_timer", "src/runtime/scheduler.rs:Sched::replenish_budgets"]
 host_tests = ["tests::budget_exhaustion_removes_task_until_replenishment"]
 tla = "spec/SchedulerBudget.tla:ExhaustedNotEligible"
 hil = ["A3_RTOS_BUDGET_OK"]
@@ -88,7 +88,7 @@ host_tests = ["scheduling::tests::switch_out_preserves_unused_budget"]
 
 [[requirement]]
 id = "RTOS-BUDGET-006"
-implementation = ["src/scheduling.rs:BudgetState::throttle_after_lock_overrun", "src/lib.rs:Sched::unlock_current_and_take_preemption"]
+implementation = ["src/scheduling.rs:BudgetState::throttle_after_lock_overrun", "src/runtime/scheduler.rs:Sched::unlock_current_and_take_preemption"]
 host_tests = ["scheduling::tests::scheduler_lock_cannot_erase_an_exhaustion_by_crossing_periods", "tests::scheduler_lock_defers_but_cannot_cancel_budget_throttle"]
 tla = "spec/SchedulerBudget.tla:LockCannotEraseExhaustion"
 
@@ -100,88 +100,113 @@ kani = "NotApplicable: this requirement narrows the service claim rather than ad
 
 [[requirement]]
 id = "RTOS-LOCK-001"
-implementation = ["src/lib.rs:Sched::lock_current", "src/lib.rs:Sched::unlock_current"]
+implementation = ["src/runtime/scheduler.rs:Sched::lock_current", "src/runtime/scheduler.rs:Sched::unlock_current"]
 host_tests = ["tests::scheduler_lock_is_nested_and_rejects_unbalanced_unlock"]
 
 [[requirement]]
 id = "RTOS-LOCK-002"
-implementation = ["src/lib.rs:Sched::take_irq_epilogue_target", "src/lib.rs:Sched::unlock_current_and_take_preemption"]
+implementation = ["src/runtime/scheduler.rs:Sched::take_irq_epilogue_target", "src/runtime/scheduler.rs:Sched::unlock_current_and_take_preemption"]
 host_tests = ["tests::irq_epilogue_preempts_only_after_outermost_interrupt_exit", "tests::outermost_scheduler_unlock_releases_pending_higher_priority_task"]
 hil = ["A3_SCHEDULER_STRESS_OK"]
 
 [[requirement]]
 id = "RTOS-LOCK-003"
-implementation = ["src/lib.rs:Sched::current_switch_guard", "src/lib.rs:yield_now", "src/lib.rs:sleep_ms", "src/lib.rs:task_exit", "src/lib.rs:Semaphore::down_timeout", "src/lib.rs:RtosMutex::lock"]
+implementation = ["src/runtime/scheduler.rs:Sched::current_switch_guard", "src/runtime.rs:yield_now", "src/runtime.rs:sleep_ms", "src/runtime.rs:task_exit", "src/runtime/sync.rs:Semaphore::down_timeout", "src/runtime/sync.rs:RtosMutex::lock"]
 host_tests = ["tests::scheduler_lock_rejects_switching_or_blocking_entry_points"]
 
 [[requirement]]
 id = "RTOS-LOCK-004"
-implementation = ["src/lib.rs:PortedConfig::max_scheduler_lock_duration", "src/lib.rs:Sched::scheduler_lock_deadline", "src/lib.rs:ContractViolation"]
+implementation = ["src/config.rs:PortedConfig::max_scheduler_lock_duration", "src/runtime/scheduler.rs:Sched::scheduler_lock_deadline", "src/config.rs:ContractViolation"]
 host_tests = ["tests::scheduler_lock_limit_is_a_timer_deadline_and_fail_stop_violation"]
 
 [[requirement]]
 id = "RTOS-IRQ-001"
-implementation = ["src/lib.rs:interrupt_enter", "src/lib.rs:interrupt_exit"]
+implementation = ["src/runtime.rs:interrupt_enter", "src/runtime.rs:interrupt_exit"]
 host_tests = ["tests::irq_epilogue_preempts_only_after_outermost_interrupt_exit"]
 hil = ["A3_SCHEDULER_STRESS_OK"]
 
 [[requirement]]
+id = "RTOS-OBS-001"
+implementation = ["src/runtime/scheduler.rs:TaskMetrics::on_dispatch", "src/runtime/scheduler.rs:TaskMetrics::on_switch_out", "src/runtime/scheduler.rs:Sched::task_diagnostics"]
+host_tests = ["tests::task_metrics_account_dispatch_cpu_and_ready_latency"]
+
+[[requirement]]
+id = "RTOS-OBS-002"
+implementation = ["src/runtime.rs:interrupt_enter", "src/runtime.rs:interrupt_exit", "src/runtime/scheduler.rs:Sched::interrupt_enter", "src/runtime/scheduler.rs:Sched::interrupt_exit"]
+host_tests = ["tests::task_metrics_attribute_outermost_irq_span_to_interrupted_task"]
+
+[[requirement]]
+id = "RTOS-OBS-003"
+implementation = ["src/runtime/scheduler.rs:Sched::lock_current", "src/runtime/scheduler.rs:Sched::unlock_current", "src/runtime/scheduler.rs:Tcb::max_scheduler_lock_ms"]
+host_tests = ["tests::task_metrics_measure_outermost_scheduler_lock_interval"]
+
+[[requirement]]
+id = "RTOS-OBS-004"
+implementation = ["src/runtime/scheduler.rs:TaskMetrics::budget_exhaustions", "src/runtime/scheduler.rs:Sched::on_timer"]
+host_tests = ["tests::budget_exhaustion_removes_task_until_replenishment"]
+
+[[requirement]]
+id = "RTOS-OBS-005"
+implementation = ["src/runtime/scheduler.rs:TaskMetrics", "src/runtime/scheduler.rs:Sched::task_diagnostics"]
+host_tests = ["tests::task_metrics_account_dispatch_cpu_and_ready_latency", "tests::task_metrics_measure_outermost_scheduler_lock_interval"]
+
+[[requirement]]
 id = "RTOS-WAIT-001"
-implementation = ["src/lib.rs:Sched::wake_sleepers", "src/lib.rs:Semaphore::down_timeout"]
+implementation = ["src/runtime/scheduler.rs:Sched::wake_sleepers", "src/runtime/sync.rs:Semaphore::down_timeout"]
 host_tests = ["tests::timed_semaphore_wait_wakes_only_after_its_deadline", "tests::forever_semaphore_wait_is_not_treated_as_an_expired_deadline"]
 hil = ["A3_SCHEDULER_STRESS_OK"]
 
 [[requirement]]
 id = "RTOS-WAIT-002"
-implementation = ["src/lib.rs:Semaphore::up", "src/lib.rs:Tcb::sem_granted"]
+implementation = ["src/runtime/sync.rs:Semaphore::up", "src/runtime/scheduler.rs:Tcb::sem_granted"]
 host_tests = ["tests::timed_semaphore_wait_wakes_only_after_its_deadline"]
 
 [[requirement]]
 id = "RTOS-MUTEX-001"
-implementation = ["src/lib.rs:RtosMutex::unlock", "src/lib.rs:pop_mutex_waiter"]
+implementation = ["src/runtime/sync.rs:RtosMutex::unlock", "src/runtime/sync.rs:pop_mutex_waiter"]
 host_tests = ["tests::mutex_handoff_transfers_remaining_inheritance_to_new_owner"]
 hil = ["A3_PRIORITY_INHERITANCE_OK"]
 
 [[requirement]]
 id = "RTOS-MUTEX-002"
-implementation = ["src/lib.rs:Sched::refresh_inherited_priority"]
+implementation = ["src/runtime/scheduler.rs:Sched::refresh_inherited_priority"]
 host_tests = ["tests::chained_mutex_inheritance_propagates_effective_priority", "tests::timed_out_mutex_waiter_restores_owner_priority"]
 hil = ["A3_PRIORITY_INHERITANCE_OK"]
 
 [[requirement]]
 id = "RTOS-PORT-001"
-implementation = ["src/lib.rs:CooperativeConfig", "src/lib.rs:CooperativeOnly", "src/lib.rs:start_cooperative"]
+implementation = ["src/config.rs:CooperativeConfig", "src/config.rs:CooperativeOnly", "src/runtime.rs:start_cooperative"]
 host_tests = ["tests/ui/cooperative_policy.rs"]
 
 [[requirement]]
 id = "RTOS-PORT-002"
-implementation = ["src/lib.rs:PortedConfig", "src/lib.rs:Ported", "src/lib.rs:start_with_port", "src/lib.rs:RuntimeHandle"]
+implementation = ["src/config.rs:PortedConfig", "src/config.rs:Ported", "src/runtime.rs:start_with_port", "src/config.rs:RuntimeHandle"]
 host_tests = ["tests/ui/ported_policy.rs"]
 
 [[requirement]]
 id = "RTOS-PORT-003"
-implementation = ["src/lib.rs:machine_interrupts_enabled", "src/lib.rs:ensure_switch_delivery", "src/lib.rs:switch_to"]
+implementation = ["src/runtime.rs:machine_interrupts_enabled", "src/runtime.rs:ensure_switch_delivery", "src/runtime.rs:switch_to"]
 host_tests = ["tests::ported_thread_switch_requires_mie_but_irq_epilogue_does_not"]
 
 [[requirement]]
 id = "RTOS-TIMER-001"
-implementation = ["src/lib.rs:earliest_deadline", "src/lib.rs:rearm_timer"]
+implementation = ["src/runtime/time.rs:earliest_deadline", "src/runtime/time.rs:rearm_timer"]
 host_tests = ["tests::shared_timer_uses_earliest_rtos_slice_or_embassy_deadline"]
 hil = ["A3_RTOS_EMBASSY_COEXIST_OK", "A3_RTOS_BUDGET_OK"]
 
 [[requirement]]
 id = "RTOS-TIMER-002"
-implementation = ["src/lib.rs:__hisi_irq_epilogue", "src/lib.rs:rearm_timer"]
+implementation = ["src/runtime.rs:__hisi_irq_epilogue", "src/runtime/time.rs:rearm_timer"]
 host_tests = ["tests::unrelated_deadline_rearm_does_not_postpone_time_slice"]
 hil = ["A3_RTOS_BUDGET_OK"]
 
 [[requirement]]
 id = "RTOS-TIMER-003"
-implementation = ["src/lib.rs:claim_timer_rearm_generation", "src/lib.rs:rearm_timer"]
+implementation = ["src/runtime/time.rs:claim_timer_rearm_generation", "src/runtime/time.rs:rearm_timer"]
 host_tests = ["tests::stale_timer_programming_ticket_requires_retry"]
 
 [[requirement]]
 id = "RTOS-CONTEXT-001"
-implementation = ["src/lib.rs:TaskContext", "src/lib.rs:context_switch"]
+implementation = ["src/context.rs:TaskContext", "src/context.rs:context_switch"]
 host_tests = []
 hil = ["A3_RTOS_PREEMPTION_OK"]

@@ -172,6 +172,30 @@ pub struct TaskDiagnostic {
     pub run_policy: RunPolicy,
     pub budget_remaining: u32,
     pub budget_replenishes_at: u64,
+    /// Cumulative dispatch-to-switch wall time charged to this task.
+    ///
+    /// This includes time spent servicing interrupts while the task was the
+    /// interrupted context; subtract [`Self::irq_time_ms`] for the corresponding
+    /// thread-mode estimate.
+    pub cpu_time_ms: u64,
+    /// Cumulative outermost interrupt-handler time attributed to this task.
+    pub irq_time_ms: u64,
+    /// Number of times this task became the running task.
+    pub dispatches: u32,
+    /// Number of this task's Budgeted quota exhaustion events.
+    pub budget_exhaustions: u32,
+    /// Longest uninterrupted dispatch-to-switch interval observed.
+    pub max_continuous_run_ms: u64,
+    /// Longest interval from becoming ready to being dispatched.
+    pub max_ready_latency_ms: u64,
+    /// Number of outermost scheduler-lock acquisitions by this task.
+    pub scheduler_lock_entries: u32,
+    /// Longest outermost scheduler-lock hold interval observed.
+    pub max_scheduler_lock_ms: u64,
+    /// Number of outermost interrupt entries attributed to this task.
+    pub irq_entries: u32,
+    /// Longest outermost interrupt-handler interval attributed to this task.
+    pub max_irq_span_ms: u64,
 }
 
 impl Diagnostics {

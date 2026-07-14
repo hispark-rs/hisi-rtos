@@ -13,7 +13,7 @@ if normative_match is None:
     raise SystemExit("requirements.toml has no normative_spec")
 normative_spec = normative_match.group(1)
 spec = (ROOT / normative_spec).read_text()
-source = "\n".join(path.read_text() for path in (ROOT / "src").glob("*.rs"))
+source_files = {path.relative_to(ROOT).as_posix(): path.read_text() for path in (ROOT / "src").rglob("*.rs")}
 
 spec_ids = set(re.findall(r"RTOS-[A-Z]+-\d{3}", spec))
 blocks = manifest.split("[[requirement]]")[1:]
@@ -38,9 +38,11 @@ for requirement_id, block in entries:
     implementation_match = re.search(r'^implementation = \[(.*?)\]$', block, re.MULTILINE)
     implementations = [] if implementation_match is None else re.findall(r'"([^"]+)"', implementation_match.group(1))
     for implementation in implementations:
-        _, _, symbol = implementation.partition(":")
+        path, separator, symbol = implementation.partition(":")
+        if not separator or path not in source_files:
+            raise SystemExit(f"{requirement_id} references missing source file {implementation}")
         leaf = symbol.split("::")[-1]
-        if leaf and leaf not in source:
+        if leaf and leaf not in source_files[path]:
             raise SystemExit(f"{requirement_id} references missing symbol {implementation}")
 
 print(f"requirements: {len(entries)} IDs aligned with {normative_spec}")

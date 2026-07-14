@@ -52,7 +52,7 @@ fn scheduler_lock_rejects_switching_or_blocking_entry_points() {
         scheduler.current_switch_guard(),
         Err(DriverError::InvalidContext)
     );
-    scheduler.unlock_current().unwrap();
+    scheduler.unlock_current(1).unwrap();
     assert_eq!(scheduler.current_switch_guard(), Ok(0));
 }
 
@@ -99,7 +99,7 @@ fn cooperative_yield_hands_off_before_requeueing_higher_priority_task() {
     scheduler.tasks[1].priority = 2;
     ready_task(&mut scheduler, 2, 8);
 
-    assert_eq!(scheduler.take_yield_target(1), Some(2));
+    assert_eq!(scheduler.take_yield_target(1, 0), Some(2));
     assert_eq!(scheduler.ready_pop(), 1);
 }
 
@@ -173,9 +173,73 @@ fn scheduler_lock_is_nested_and_rejects_unbalanced_unlock() {
     scheduler.lock_current(10).unwrap();
     scheduler.lock_current(11).unwrap();
     assert_eq!(scheduler.tasks[0].scheduler_lock_depth, 2);
-    scheduler.unlock_current().unwrap();
-    scheduler.unlock_current().unwrap();
-    assert_eq!(scheduler.unlock_current(), Err(DriverError::InvalidContext));
+    scheduler.unlock_current(12).unwrap();
+    scheduler.unlock_current(13).unwrap();
+    assert_eq!(
+        scheduler.unlock_current(14),
+        Err(DriverError::InvalidContext)
+    );
+}
+
+#[test]
+fn task_metrics_account_dispatch_cpu_and_ready_latency() {
+    let mut scheduler = Sched::new();
+    scheduler.current = 0;
+    scheduler.tasks[0].state = State::Running;
+    scheduler.tasks[0].metrics.on_dispatch(100);
+    scheduler.make_ready(1, 103);
+
+    scheduler.account_switch(0, 1, 110);
+    scheduler.current = 1;
+    scheduler.tasks[1].state = State::Running;
+
+    assert_eq!(scheduler.tasks[0].metrics.cpu_time_ms, 10);
+    assert_eq!(scheduler.tasks[0].metrics.max_continuous_run_ms, 10);
+    assert_eq!(scheduler.tasks[1].metrics.dispatches, 1);
+    assert_eq!(scheduler.tasks[1].metrics.max_ready_latency_ms, 7);
+
+    let mut snapshot = [TaskDiagnostic::default(); TASK_SLOT_COUNT];
+    assert_eq!(
+        scheduler.task_diagnostics(&mut snapshot, 115),
+        TASK_SLOT_COUNT
+    );
+    assert_eq!(snapshot[1].cpu_time_ms, 5);
+    assert_eq!(snapshot[1].max_continuous_run_ms, 5);
+}
+
+#[test]
+fn task_metrics_measure_outermost_scheduler_lock_interval() {
+    let mut scheduler = Sched::new();
+    scheduler.tasks[0].state = State::Running;
+
+    scheduler.lock_current(20).unwrap();
+    scheduler.lock_current(22).unwrap();
+
+    let mut snapshot = [TaskDiagnostic::default(); TASK_SLOT_COUNT];
+    scheduler.task_diagnostics(&mut snapshot, 27);
+    assert_eq!(snapshot[0].scheduler_lock_entries, 1);
+    assert_eq!(snapshot[0].max_scheduler_lock_ms, 7);
+
+    scheduler.unlock_current(28).unwrap();
+    scheduler.unlock_current(29).unwrap();
+    scheduler.task_diagnostics(&mut snapshot, 40);
+    assert_eq!(snapshot[0].scheduler_lock_entries, 1);
+    assert_eq!(snapshot[0].max_scheduler_lock_ms, 9);
+}
+
+#[test]
+fn task_metrics_attribute_outermost_irq_span_to_interrupted_task() {
+    let mut scheduler = Sched::new();
+    scheduler.current = 0;
+    scheduler.tasks[0].state = State::Running;
+
+    scheduler.interrupt_enter(30);
+    scheduler.interrupt_exit(34);
+
+    let metrics = &scheduler.tasks[0].metrics;
+    assert_eq!(metrics.irq_entries, 1);
+    assert_eq!(metrics.irq_time_ms, 4);
+    assert_eq!(metrics.max_irq_span_ms, 4);
 }
 
 #[test]
@@ -212,9 +276,9 @@ fn irq_epilogue_preempts_only_after_outermost_interrupt_exit() {
     };
     ready_task(&mut scheduler, 1, 4);
 
-    assert_eq!(scheduler.take_irq_epilogue_target(1), None);
+    assert_eq!(scheduler.take_irq_epilogue_target(1, 0), None);
     assert_eq!(scheduler.diagnostics.irq_preemptions, 0);
-    assert_eq!(scheduler.take_irq_epilogue_target(0), Some((0, 1)));
+    assert_eq!(scheduler.take_irq_epilogue_target(0, 0), Some((0, 1)));
     assert_eq!(scheduler.diagnostics.irq_preemptions, 1);
 }
 
@@ -225,10 +289,10 @@ fn cooperative_task_is_not_preempted_by_irq_but_can_yield() {
     scheduler.tasks[0].priority = 10;
     ready_task(&mut scheduler, 1, 4);
 
-    assert_eq!(scheduler.take_irq_epilogue_target(0), None);
+    assert_eq!(scheduler.take_irq_epilogue_target(0, 0), None);
     scheduler.started = true;
-    assert_eq!(scheduler.take_irq_epilogue_target(0), None);
-    assert_eq!(scheduler.take_yield_target(0), Some(1));
+    assert_eq!(scheduler.take_irq_epilogue_target(0, 0), None);
+    assert_eq!(scheduler.take_yield_target(0, 0), Some(1));
     assert_eq!(scheduler.diagnostics.irq_preemptions, 0);
 }
 
@@ -243,9 +307,9 @@ fn expired_time_slice_round_robins_equal_priority_tasks() {
     };
     ready_task(&mut scheduler, 1, 4);
 
-    assert_eq!(scheduler.take_irq_epilogue_target(0), None);
+    assert_eq!(scheduler.take_irq_epilogue_target(0, 0), None);
     scheduler.time_slice_pending = true;
-    assert_eq!(scheduler.take_irq_epilogue_target(0), Some((0, 1)));
+    assert_eq!(scheduler.take_irq_epilogue_target(0, 0), Some((0, 1)));
     assert_eq!(scheduler.diagnostics.time_slice_preemptions, 1);
     assert!(!scheduler.time_slice_pending);
 }
@@ -263,7 +327,7 @@ fn scheduler_lock_preserves_expired_time_slice_until_unlock() {
     scheduler.time_slice_pending = true;
     scheduler.lock_current(100).unwrap();
 
-    assert_eq!(scheduler.take_irq_epilogue_target(0), None);
+    assert_eq!(scheduler.take_irq_epilogue_target(0, 0), None);
     assert!(scheduler.time_slice_pending);
     assert_eq!(
         scheduler.unlock_current_and_take_preemption(0).unwrap(),
@@ -289,7 +353,8 @@ fn budget_exhaustion_removes_task_until_replenishment() {
     assert_eq!(scheduler.on_timer(105, NonZeroU32::new(100).unwrap()), None);
     assert_eq!(scheduler.tasks[0].state, State::Throttled);
     assert_eq!(scheduler.diagnostics.budget_exhaustions, 1);
-    assert_eq!(scheduler.take_irq_epilogue_target(0), Some((0, 1)));
+    assert_eq!(scheduler.tasks[0].metrics.budget_exhaustions, 1);
+    assert_eq!(scheduler.take_irq_epilogue_target(0, 105), Some((0, 1)));
 
     scheduler.replenish_budgets(119);
     assert_eq!(scheduler.tasks[0].state, State::Throttled);
@@ -314,7 +379,7 @@ fn scheduler_lock_defers_but_cannot_cancel_budget_throttle() {
 
     assert_eq!(scheduler.on_timer(105, NonZeroU32::new(100).unwrap()), None);
     assert_eq!(scheduler.tasks[0].state, State::Running);
-    assert_eq!(scheduler.take_irq_epilogue_target(0), None);
+    assert_eq!(scheduler.take_irq_epilogue_target(0, 105), None);
     assert_eq!(scheduler.diagnostics.budget_lock_overruns, 1);
 
     assert_eq!(
@@ -570,7 +635,7 @@ fn mutex_handoff_transfers_remaining_inheritance_to_new_owner() {
     scheduler.add_inheritance(0, 2);
     scheduler.add_inheritance(0, 5);
 
-    unsafe { release_mutex_locked(&mut scheduler, &mut *mutex.inner.get(), 0) };
+    unsafe { release_mutex_locked(&mut scheduler, &mut *mutex.inner.get(), 0, 0) };
 
     let state = unsafe { &*mutex.inner.get() };
     assert_eq!(state.owner, 1);

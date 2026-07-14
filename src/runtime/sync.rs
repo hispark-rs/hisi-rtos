@@ -164,6 +164,7 @@ impl Semaphore {
     /// Release (V). Wakes one waiter if any, else increments the count.
     pub(super) fn up(&self) -> Result<(), DriverError> {
         let machine_interrupts_enabled = machine_interrupts_enabled();
+        let now = now_ms();
         let mut defer_reschedule = false;
         let preemption = critical_section::with(|cs| {
             let s = &mut *SCHED.borrow_ref_mut(cs);
@@ -179,15 +180,14 @@ impl Semaphore {
                 s.tasks[w].wake_at = 0;
                 s.tasks[w].waiting_sem = 0;
                 s.tasks[w].sem_granted = true;
-                s.tasks[w].state = State::Ready;
-                s.ready_push(w);
+                s.make_ready(w, now);
                 s.diagnostics.semaphore_wakes = s.diagnostics.semaphore_wakes.saturating_add(1);
             } else {
                 st.count += 1;
             }
             let interrupt_depth = INTERRUPT_DEPTH.borrow(cs).get();
             if interrupt_depth == 0 && machine_interrupts_enabled {
-                s.take_preemption_target()
+                s.take_preemption_target(now)
             } else {
                 defer_reschedule = interrupt_depth == 0 && !machine_interrupts_enabled;
                 None
@@ -289,6 +289,7 @@ impl RtosMutex {
 
     pub(super) fn unlock(&self) -> Result<(), DriverError> {
         let machine_interrupts_enabled = machine_interrupts_enabled();
+        let now = now_ms();
         let mut defer_reschedule = false;
         let preemption = critical_section::with(|cs| {
             let s = &mut *SCHED.borrow_ref_mut(cs);
@@ -302,11 +303,11 @@ impl RtosMutex {
             if state.depth != 0 {
                 return Ok(None);
             }
-            release_mutex_locked(s, state, current);
+            release_mutex_locked(s, state, current, now);
 
             let interrupt_depth = INTERRUPT_DEPTH.borrow(cs).get();
             Ok(if interrupt_depth == 0 && machine_interrupts_enabled {
-                s.take_preemption_target()
+                s.take_preemption_target(now)
             } else {
                 defer_reschedule = interrupt_depth == 0 && !machine_interrupts_enabled;
                 None
@@ -323,7 +324,12 @@ impl RtosMutex {
     }
 }
 
-pub(super) fn release_mutex_locked(sched: &mut Sched, state: &mut MutexState, owner: usize) {
+pub(super) fn release_mutex_locked(
+    sched: &mut Sched,
+    state: &mut MutexState,
+    owner: usize,
+    now: u64,
+) {
     let next = pop_mutex_waiter(sched, state);
     if next == NIL {
         state.owner = NIL;
@@ -344,8 +350,7 @@ pub(super) fn release_mutex_locked(sched: &mut Sched, state: &mut MutexState, ow
     sched.tasks[next].waiting_mutex = 0;
     sched.tasks[next].wake_at = 0;
     sched.tasks[next].sem_granted = true;
-    sched.tasks[next].state = State::Ready;
-    sched.ready_push(next);
+    sched.make_ready(next, now);
 
     // Remaining waiters now donate to the new owner.
     waiter = state.wait_head;

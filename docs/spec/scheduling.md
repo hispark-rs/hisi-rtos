@@ -88,6 +88,25 @@ are non-zero and `capacity <= replenishment_period`.
 - **RTOS-IRQ-001:** User callbacks never run in an ISR, critical section, or
   scheduler lock. ISR work is acknowledge/record/wake only.
 
+## Per-Thread Observability
+
+- **RTOS-OBS-001:** Each task exposes saturating cumulative dispatch-to-switch
+  wall time, dispatch count, longest continuous run, and longest ready-to-dispatch
+  latency. A read-only snapshot includes the current running interval without
+  mutating scheduler state.
+- **RTOS-OBS-002:** CPU accounting conservatively includes interrupt handling
+  while the task is the interrupted context. A separate cumulative outermost IRQ
+  time, entry count, and longest IRQ span are exposed so diagnostics can estimate
+  thread-mode time without pretending IRQ work belongs to another task.
+- **RTOS-OBS-003:** Scheduler-lock diagnostics count only outermost lock
+  acquisitions and expose the longest outermost hold interval, including an
+  in-progress lock in a read-only snapshot.
+- **RTOS-OBS-004:** Budget exhaustion is counted per task as well as globally.
+  Saturating counters must not wrap and silently erase prior evidence.
+- **RTOS-OBS-005:** Hot-path accounting performs bounded in-memory updates only.
+  It must not format output, invoke user callbacks, or perform UART/MMIO logging
+  while holding the scheduler critical section.
+
 ## Waits And Priority Inheritance
 
 - **RTOS-WAIT-001:** Signal, timeout, interrupt wake, and cancellation compete at
