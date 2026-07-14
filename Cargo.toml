@@ -9,6 +9,12 @@ readme = "README.md"
 keywords = ["embedded", "no-std", "riscv", "rtos"]
 categories = ["embedded", "no-std"]
 
+[features]
+default = []
+embassy = ["dep:embassy-time-driver", "dep:embassy-time-queue-utils"]
+
 [dependencies]
 critical-section = "1"
-hisi-rf-rtos-driver = "0.1.0-alpha.4"
+embassy-time-driver = { version = "0.2", optional = true }
+embassy-time-queue-utils = { version = "0.3", optional = true, features = ["generic-queue-16"] }
+hisi-rf-rtos-driver = "0.1.0-alpha.5"

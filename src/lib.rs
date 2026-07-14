@@ -8,7 +8,12 @@
 //!
 //! Cooperative scheduling remains available. Priority scheduling additionally
 //! permits an interrupt epilogue to switch immediately to a higher-priority task
-//! made ready by the ISR. Timer-driven time slicing remains a follow-on.
+//! made ready by the ISR and to time-slice equal-priority tasks.
+//!
+//! With the `embassy` feature, this crate also owns the process-wide
+//! `embassy-time` driver. Embassy deadlines and RTOS sleep/time-slice deadlines
+//! share the injected scheduler timer; applications must select
+//! `embassy-time/tick-hz-1_000` because [`Resources::monotonic_ms`] is the clock.
 //!
 //! Layering: this crate depends only on `core`, `critical-section`, and the
 //! runtime-neutral radio driver contract. The application injects allocation
@@ -19,7 +24,13 @@
 use core::cell::{Cell, RefCell, UnsafeCell};
 use core::ffi::c_void;
 use core::num::{NonZeroU32, NonZeroUsize};
+#[cfg(feature = "embassy")]
+use core::task::Waker;
 use critical_section::Mutex;
+#[cfg(feature = "embassy")]
+use embassy_time_driver::Driver as EmbassyTimeDriver;
+#[cfg(feature = "embassy")]
+use embassy_time_queue_utils::Queue as EmbassyTimeQueue;
 use hisi_rf_rtos_driver::{
     Error as DriverError, MutexHandle, Runtime, SemaphoreHandle, TaskConfig, TaskId, WaitOutcome,
     WaitTimeout,
@@ -186,9 +197,16 @@ struct StartState {
 
 static START_STATE: Mutex<Cell<Option<StartState>>> = Mutex::new(Cell::new(None));
 
+#[cfg(feature = "embassy")]
+static EMBASSY_TIME_QUEUE: Mutex<RefCell<EmbassyTimeQueue>> =
+    Mutex::new(RefCell::new(EmbassyTimeQueue::new()));
+
 fn start_state() -> StartState {
+    start_state_opt().expect("hisi-rtos must be started before radio runtime use")
+}
+
+fn start_state_opt() -> Option<StartState> {
     critical_section::with(|cs| START_STATE.borrow(cs).get())
-        .expect("hisi-rtos must be started before radio runtime use")
 }
 
 fn allocate(size: usize) -> *mut u8 {
@@ -453,6 +471,7 @@ struct Sched {
     retired_count: usize,
     priority_scheduling: bool,
     time_slice_pending: bool,
+    time_slice_deadline: u64,
     forced_next: usize,
     started: bool,
     diagnostics: Diagnostics,
@@ -469,6 +488,7 @@ impl Sched {
             retired_count: 0,
             priority_scheduling: false,
             time_slice_pending: false,
+            time_slice_deadline: 0,
             forced_next: NIL,
             started: false,
             diagnostics: Diagnostics::EMPTY,
@@ -835,6 +855,17 @@ impl Sched {
             .min()
     }
 
+    fn next_time_slice_deadline(&mut self, now: u64, slice: Option<NonZeroU32>) -> Option<u64> {
+        if slice.is_none() || !self.has_ready_task() {
+            self.time_slice_deadline = 0;
+            return None;
+        }
+        if self.time_slice_deadline == 0 {
+            self.time_slice_deadline = now.saturating_add(slice.unwrap().get() as u64);
+        }
+        Some(self.time_slice_deadline)
+    }
+
     fn has_ready_task(&self) -> bool {
         self.ready_head.iter().any(|head| *head != NIL)
     }
@@ -898,30 +929,48 @@ fn now_ms() -> u64 {
     (start_state().resources.monotonic_ms)()
 }
 
+fn earliest_deadline(
+    wake_deadline: Option<u64>,
+    slice_deadline: Option<u64>,
+    embassy_deadline: Option<u64>,
+) -> Option<u64> {
+    wake_deadline
+        .into_iter()
+        .chain(slice_deadline)
+        .chain(embassy_deadline)
+        .min()
+}
+
+#[cfg(feature = "embassy")]
+fn embassy_next_expiration(now: u64) -> Option<u64> {
+    let deadline = critical_section::with(|cs| {
+        EMBASSY_TIME_QUEUE
+            .borrow(cs)
+            .borrow_mut()
+            .next_expiration(now)
+    });
+    (deadline != u64::MAX).then_some(deadline)
+}
+
+#[cfg(not(feature = "embassy"))]
+fn embassy_next_expiration(_now: u64) -> Option<u64> {
+    None
+}
+
 fn rearm_timer() {
     let state = start_state();
     let Some(port) = state.port else {
         return;
     };
     let now = (state.resources.monotonic_ms)();
-    let (wake_deadline, has_ready_task) = critical_section::with(|cs| {
-        let scheduler = SCHED.borrow_ref(cs);
+    let (wake_deadline, slice_deadline) = critical_section::with(|cs| {
+        let scheduler = &mut *SCHED.borrow_ref_mut(cs);
         (
             scheduler.earliest_wake_deadline(),
-            scheduler.has_ready_task(),
+            scheduler.next_time_slice_deadline(now, state.config.time_slice),
         )
     });
-    let slice_deadline = state
-        .config
-        .time_slice
-        .filter(|_| has_ready_task)
-        .map(|slice| now.saturating_add(slice.get() as u64));
-    let deadline = match (wake_deadline, slice_deadline) {
-        (Some(wake), Some(slice)) => Some(wake.min(slice)),
-        (Some(wake), None) => Some(wake),
-        (None, Some(slice)) => Some(slice),
-        (None, None) => None,
-    };
+    let deadline = earliest_deadline(wake_deadline, slice_deadline, embassy_next_expiration(now));
     let Some(deadline) = deadline else {
         (port.disarm_timer)();
         return;
@@ -939,14 +988,14 @@ fn rearm_timer() {
 /// task's stack.
 pub fn on_timer_interrupt() {
     let now = now_ms();
-    let time_slice_enabled = start_state().config.time_slice.is_some();
     critical_section::with(|cs| {
         let scheduler = &mut *SCHED.borrow_ref_mut(cs);
         scheduler.diagnostics.timer_interrupts =
             scheduler.diagnostics.timer_interrupts.saturating_add(1);
         scheduler.wake_sleepers(now);
-        if time_slice_enabled {
+        if scheduler.time_slice_deadline != 0 && now >= scheduler.time_slice_deadline {
             scheduler.time_slice_pending = true;
+            scheduler.time_slice_deadline = 0;
         }
     });
     rearm_timer();
@@ -971,6 +1020,35 @@ pub fn request_reschedule() {
         (port.pend_reschedule)();
     }
 }
+
+#[cfg(feature = "embassy")]
+struct HisiEmbassyTimeDriver;
+
+#[cfg(feature = "embassy")]
+impl EmbassyTimeDriver for HisiEmbassyTimeDriver {
+    fn now(&self) -> u64 {
+        start_state_opt()
+            .map(|state| (state.resources.monotonic_ms)())
+            .unwrap_or(0)
+    }
+
+    fn schedule_wake(&self, at: u64, waker: &Waker) {
+        let changed = critical_section::with(|cs| {
+            EMBASSY_TIME_QUEUE
+                .borrow(cs)
+                .borrow_mut()
+                .schedule_wake(at, waker)
+        });
+        if changed && start_state_opt().and_then(|state| state.port).is_some() {
+            rearm_timer();
+        }
+    }
+}
+
+#[cfg(feature = "embassy")]
+embassy_time_driver::time_driver_impl!(
+    static EMBASSY_TIME_DRIVER: HisiEmbassyTimeDriver = HisiEmbassyTimeDriver
+);
 
 /// First-run trampoline: a freshly restored task lands here (`ctx.mepc`),
 /// runs its entry, then exits. Reads its own entry/arg from the current TCB.
@@ -2015,6 +2093,30 @@ mod tests {
         scheduler.tasks[3].wake_at = 17;
 
         assert_eq!(scheduler.earliest_wake_deadline(), Some(17));
+    }
+
+    #[test]
+    fn shared_timer_uses_earliest_rtos_slice_or_embassy_deadline() {
+        assert_eq!(earliest_deadline(Some(30), Some(20), Some(10)), Some(10));
+        assert_eq!(earliest_deadline(Some(30), Some(20), None), Some(20));
+        assert_eq!(earliest_deadline(Some(30), None, Some(40)), Some(30));
+        assert_eq!(earliest_deadline(None, None, Some(40)), Some(40));
+        assert_eq!(earliest_deadline(None, None, None), None);
+    }
+
+    #[test]
+    fn unrelated_deadline_rearm_does_not_postpone_time_slice() {
+        let mut scheduler = Sched::new();
+        ready_task(&mut scheduler, 1, 4);
+        let slice = NonZeroU32::new(5);
+
+        assert_eq!(scheduler.next_time_slice_deadline(10, slice), Some(15));
+        assert_eq!(scheduler.next_time_slice_deadline(12, slice), Some(15));
+
+        scheduler.time_slice_deadline = 0;
+        assert_eq!(scheduler.next_time_slice_deadline(15, slice), Some(20));
+        scheduler.ready_pop();
+        assert_eq!(scheduler.next_time_slice_deadline(16, slice), None);
     }
 
     #[test]

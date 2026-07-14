@@ -14,8 +14,12 @@ next task and restores it with `mret`.
 is an explicit application choice. Exited stacks are reclaimed by another task,
 and nested scheduler locks suppress preemption until the outermost unlock.
 Recursive mutexes use priority-ordered waiters, direct handoff, timeout cleanup,
-and transitive priority inheritance. Embassy executor/time integration remains
-planned work; peripheral async traits stay in `hisi-hal`.
+and transitive priority inheritance. Enable `embassy` to make this crate the
+firmware's `embassy-time` driver. The driver uses the injected millisecond
+clock, so applications select `embassy-time/tick-hz-1_000`. RTOS sleep/time-
+slice and Embassy deadlines share the same `SchedulerPort` timer; HAL must not
+install a second time driver in the same firmware. Peripheral async traits stay
+in `hisi-hal`.
 
 Vendor LiteOS is a behavior and disassembly oracle for the WS63 blob ABI, not a
 backend or dependency of this crate. `hisi-rtos` is the sole maintained native
