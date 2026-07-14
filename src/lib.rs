@@ -1,4 +1,4 @@
-//! Cooperative task scheduler and radio runtime backend.
+//! Task scheduler and radio runtime backend.
 //!
 //! Modeled on esp-rtos's scheduler (TCB + context switch + ready queue +
 //! blocking primitives), adapted for the WS63 app core (single-hart
@@ -6,12 +6,9 @@
 //! extension, so the context switch must also save/restore the callee-saved FP
 //! registers `fs0..fs11` (the WiFi blob does floating-point RF math).
 //!
-//! This is a **cooperative** scheduler: a task runs until it calls
-//! [`yield_now`], blocks on a [`Semaphore`], or [`sleep_ms`]s. That matches the
-//! vendor WiFi worker-thread model (it waits on semaphores / sleeps). Preemptive
-//! time-slicing (a timer ISR driving the switch) is a follow-on; the cooperative
-//! core is what the blob's `osal_kthread_*` / `osal_sem_*` / `osal_wait_*` /
-//! `osal_msleep` need.
+//! Cooperative scheduling remains available. Priority scheduling additionally
+//! permits an interrupt epilogue to switch immediately to a higher-priority task
+//! made ready by the ISR. Timer-driven time slicing remains a follow-on.
 //!
 //! Layering: this crate depends only on `core`, `critical-section`, and the
 //! runtime-neutral radio driver contract. The application injects allocation
@@ -68,6 +65,7 @@ pub enum SchedulingPolicy {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Diagnostics {
     pub context_switches: u32,
+    pub irq_preemptions: u32,
     pub yields: u32,
     pub sleeps: u32,
     pub sleeper_wakes: u32,
@@ -108,6 +106,7 @@ pub struct TaskDiagnostic {
 impl Diagnostics {
     const EMPTY: Self = Self {
         context_switches: 0,
+        irq_preemptions: 0,
         yields: 0,
         sleeps: 0,
         sleeper_wakes: 0,
@@ -471,6 +470,18 @@ impl Sched {
         self.ready_push(current);
         Some((current, next))
     }
+
+    #[cfg(any(test, target_arch = "riscv32"))]
+    fn take_irq_epilogue_target(&mut self, interrupt_depth: u16) -> Option<(usize, usize)> {
+        if !self.started || interrupt_depth != 0 {
+            return None;
+        }
+        let target = self.take_preemption_target();
+        if target.is_some() {
+            self.diagnostics.irq_preemptions = self.diagnostics.irq_preemptions.saturating_add(1);
+        }
+        target
+    }
     fn retire_stack(&mut self, stack: usize) {
         if stack != 0 {
             debug_assert!(self.retired_count < MAX_TASKS);
@@ -557,6 +568,23 @@ pub fn interrupt_exit() {
         debug_assert!(depth.get() != 0);
         depth.set(depth.get().saturating_sub(1));
     });
+}
+
+/// Deferred scheduling point called by `hisi-riscv-rt` on the interrupted
+/// task's stack, after the IRQ stack is no longer active.
+///
+/// The symbol deliberately remains private Rust API: the runtime assembly owns
+/// the ABI contract and provides a weak no-op when this crate is not linked.
+#[cfg(target_arch = "riscv32")]
+#[unsafe(no_mangle)]
+extern "C" fn __hisi_irq_epilogue() {
+    let target = critical_section::with(|cs| {
+        let depth = INTERRUPT_DEPTH.borrow(cs).get();
+        SCHED.borrow_ref_mut(cs).take_irq_epilogue_target(depth)
+    });
+    if let Some((current, next)) = target {
+        switch_to(current, next);
+    }
 }
 
 fn reclaim_retired_stacks() {
@@ -1208,6 +1236,34 @@ mod tests {
             Some((0, 1))
         );
         assert!(matches!(scheduler.tasks[0].state, State::Ready));
+    }
+
+    #[test]
+    fn irq_epilogue_preempts_only_after_outermost_interrupt_exit() {
+        let mut scheduler = Sched::new();
+        scheduler.started = true;
+        scheduler.priority_scheduling = true;
+        scheduler.tasks[0].state = State::Running;
+        scheduler.tasks[0].priority = 10;
+        ready_task(&mut scheduler, 1, 4);
+
+        assert_eq!(scheduler.take_irq_epilogue_target(1), None);
+        assert_eq!(scheduler.diagnostics.irq_preemptions, 0);
+        assert_eq!(scheduler.take_irq_epilogue_target(0), Some((0, 1)));
+        assert_eq!(scheduler.diagnostics.irq_preemptions, 1);
+    }
+
+    #[test]
+    fn irq_epilogue_does_not_preempt_cooperative_or_stopped_scheduler() {
+        let mut scheduler = Sched::new();
+        scheduler.tasks[0].state = State::Running;
+        scheduler.tasks[0].priority = 10;
+        ready_task(&mut scheduler, 1, 4);
+
+        assert_eq!(scheduler.take_irq_epilogue_target(0), None);
+        scheduler.started = true;
+        assert_eq!(scheduler.take_irq_epilogue_target(0), None);
+        assert_eq!(scheduler.diagnostics.irq_preemptions, 0);
     }
 
     #[test]
