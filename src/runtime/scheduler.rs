@@ -336,6 +336,22 @@ impl Sched {
         }
     }
 
+    fn ready_contains(&self, task: usize) -> bool {
+        for priority in 0..PRIORITY_LEVELS {
+            let mut current = self.ready_head[priority];
+            for _ in 0..TASK_SLOT_COUNT {
+                if current == NIL {
+                    break;
+                }
+                if current == task {
+                    return true;
+                }
+                current = self.tasks[current].next;
+            }
+        }
+        false
+    }
+
     pub(super) fn set_effective_priority(&mut self, task: usize, priority: u8) {
         if self.tasks[task].priority == priority {
             return;
@@ -411,6 +427,30 @@ impl Sched {
         self.make_ready(current, now);
         Some(next)
     }
+
+    /// Cancels a detached switch target after an IRQ already switched away
+    /// from and later resumed `previous` before thread mode called `switch_to`.
+    pub(super) fn recover_completed_switch_request(
+        &mut self,
+        previous: usize,
+        detached_next: usize,
+    ) -> bool {
+        if self.current != previous || self.tasks[previous].state != State::Running {
+            return false;
+        }
+        if detached_next != IDLE_SLOT
+            && self.tasks[detached_next].state == State::Ready
+            && !self.ready_contains(detached_next)
+        {
+            // The caller popped this target before the intervening IRQ. It is
+            // therefore detached, so restore it without resetting ready_since.
+            self.ready_push(detached_next);
+        }
+        self.diagnostics.switch_race_recoveries =
+            self.diagnostics.switch_race_recoveries.saturating_add(1);
+        true
+    }
+
     pub(super) fn take_reschedule_target(
         &mut self,
         allow_equal_priority: bool,

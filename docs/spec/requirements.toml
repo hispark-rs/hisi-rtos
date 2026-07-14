@@ -189,6 +189,11 @@ implementation = ["src/runtime.rs:machine_interrupts_enabled", "src/runtime.rs:e
 host_tests = ["tests::ported_thread_switch_requires_mie_but_irq_epilogue_does_not"]
 
 [[requirement]]
+id = "RTOS-PORT-004"
+implementation = ["src/runtime.rs:switch_to", "src/runtime/scheduler.rs:Sched::recover_completed_switch_request"]
+host_tests = ["tests::completed_irq_switch_restores_the_detached_thread_target", "tests::pending_thread_switch_is_not_mistaken_for_a_completed_irq_switch", "tests::completed_switch_recovery_does_not_duplicate_an_already_requeued_target"]
+
+[[requirement]]
 id = "RTOS-TIMER-001"
 implementation = ["src/runtime/time.rs:earliest_deadline", "src/runtime/time.rs:rearm_timer"]
 host_tests = ["tests::shared_timer_uses_earliest_rtos_slice_or_embassy_deadline"]

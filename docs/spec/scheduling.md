@@ -135,6 +135,11 @@ are non-zero and `capacity <= replenishment_period`.
   task-exit path fails stop. Non-blocking wake/signal operations may update state
   with MIE cleared and pend deferred rescheduling. ISR wakeups remain valid
   because the current trap epilogue delivers the deferred switch.
+- **RTOS-PORT-004:** If an interrupt completes a task's pending handoff after
+  thread mode detached a target but before it issues the explicit switch request,
+  the resumed task must cancel that stale request and restore the detached target
+  to its original ready queue. It must not create multiple `Running` tasks or
+  strand an eligible task outside the ready queues.
 
 - **RTOS-TIMER-001:** Sleep, wait timeout, preemptive slice, budget exhaustion,
   budget replenishment, and Embassy deadlines share the earliest one-shot timer.

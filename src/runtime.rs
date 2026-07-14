@@ -417,14 +417,21 @@ fn switch_to(prev: usize, next: usize) {
         let generation = critical_section::with(|cs| {
             let s = &mut *SCHED.borrow_ref_mut(cs);
             assert_eq!(s.current, prev, "switch source is not the running task");
+            if s.recover_completed_switch_request(prev, next) {
+                return None;
+            }
             assert_eq!(s.forced_next, NIL, "a trap switch is already pending");
             assert!(
                 s.tasks[next].saved_frame != 0,
                 "target task has no trap frame"
             );
             s.forced_next = next;
-            s.tasks[prev].resume_generation
+            Some(s.tasks[prev].resume_generation)
         });
+        let Some(generation) = generation else {
+            rearm_timer();
+            return;
+        };
         rearm_timer();
         (port.pend_reschedule)();
         loop {

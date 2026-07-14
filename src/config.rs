@@ -113,6 +113,8 @@ pub struct Diagnostics {
     pub irq_preemptions: u32,
     pub timer_interrupts: u32,
     pub software_interrupts: u32,
+    /// Switch requests canceled because an IRQ completed the handoff first.
+    pub switch_race_recoveries: u32,
     pub time_slice_preemptions: u32,
     pub priority_inheritances: u32,
     pub yields: u32,
@@ -204,6 +206,7 @@ impl Diagnostics {
         irq_preemptions: 0,
         timer_interrupts: 0,
         software_interrupts: 0,
+        switch_race_recoveries: 0,
         time_slice_preemptions: 0,
         priority_inheritances: 0,
         yields: 0,

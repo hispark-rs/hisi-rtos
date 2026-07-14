@@ -104,6 +104,55 @@ fn cooperative_yield_hands_off_before_requeueing_higher_priority_task() {
 }
 
 #[test]
+fn completed_irq_switch_restores_the_detached_thread_target() {
+    let mut scheduler = Sched::new();
+    scheduler.current = 0;
+    scheduler.tasks[0].state = State::Running;
+    scheduler.tasks[2].state = State::Ready;
+    scheduler.tasks[2].priority = 4;
+
+    assert!(scheduler.recover_completed_switch_request(0, 2));
+    assert_eq!(scheduler.ready_pop(), 2);
+    assert_eq!(scheduler.diagnostics.switch_race_recoveries, 1);
+}
+
+#[test]
+fn pending_thread_switch_is_not_mistaken_for_a_completed_irq_switch() {
+    let mut scheduler = Sched::new();
+    scheduler.current = 0;
+    scheduler.tasks[0].state = State::Ready;
+    scheduler.tasks[2].state = State::Ready;
+
+    assert!(!scheduler.recover_completed_switch_request(0, 2));
+    assert_eq!(scheduler.ready_pop(), NIL);
+    assert_eq!(scheduler.diagnostics.switch_race_recoveries, 0);
+}
+
+#[test]
+fn completed_switch_recovery_does_not_duplicate_an_already_requeued_target() {
+    let mut scheduler = Sched::new();
+    scheduler.current = 0;
+    scheduler.tasks[0].state = State::Running;
+    scheduler.make_ready(2, 0);
+
+    assert!(scheduler.recover_completed_switch_request(0, 2));
+    assert_eq!(scheduler.ready_pop(), 2);
+    assert_eq!(scheduler.ready_pop(), NIL);
+}
+
+#[test]
+fn completed_switch_recovery_keeps_idle_out_of_ready_queues() {
+    let mut scheduler = Sched::new();
+    scheduler.current = 0;
+    scheduler.tasks[0].state = State::Running;
+    scheduler.tasks[IDLE_SLOT].state = State::Ready;
+
+    assert!(scheduler.recover_completed_switch_request(0, IDLE_SLOT));
+    assert_eq!(scheduler.ready_pop(), NIL);
+    assert_eq!(scheduler.ready_pop_or_idle(), IDLE_SLOT);
+}
+
+#[test]
 fn preemptive_ready_queue_uses_priority_then_fifo() {
     let mut scheduler = Sched::new();
     ready_task(&mut scheduler, 1, 8);
