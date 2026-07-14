@@ -15,8 +15,9 @@ is an explicit application choice. Exited stacks are reclaimed by another task,
 and nested scheduler locks suppress preemption until the outermost unlock.
 Recursive mutexes use priority-ordered waiters, direct handoff, timeout cleanup,
 and transitive priority inheritance. Enable `embassy` to make this crate the
-firmware's `embassy-time` driver. The driver uses the injected millisecond
-clock, so applications select `embassy-time/tick-hz-1_000`. RTOS sleep/time-
+firmware's `embassy-time` driver. The driver uses the injected millisecond clock
+at 1 ms resolution while preserving the ecosystem-wide
+`embassy-time/tick-hz-1_000_000` ABI. RTOS sleep/time-
 slice and Embassy deadlines share the same `SchedulerPort` timer; HAL must not
 install a second time driver in the same firmware. Peripheral async traits stay
 in `hisi-hal`.

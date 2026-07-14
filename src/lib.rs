@@ -13,7 +13,8 @@
 //! With the `embassy` feature, this crate also owns the process-wide
 //! `embassy-time` driver. Embassy deadlines and RTOS sleep/time-slice deadlines
 //! share the injected scheduler timer; applications must select
-//! `embassy-time/tick-hz-1_000` because [`Resources::monotonic_ms`] is the clock.
+//! `embassy-time/tick-hz-1_000_000`. The injected millisecond clock gives the
+//! driver 1 ms resolution while preserving the ecosystem-wide 1 MHz tick ABI.
 //!
 //! Layering: this crate depends only on `core`, `critical-section`, and the
 //! runtime-neutral radio driver contract. The application injects allocation
@@ -200,6 +201,12 @@ static START_STATE: Mutex<Cell<Option<StartState>>> = Mutex::new(Cell::new(None)
 #[cfg(feature = "embassy")]
 static EMBASSY_TIME_QUEUE: Mutex<RefCell<EmbassyTimeQueue>> =
     Mutex::new(RefCell::new(EmbassyTimeQueue::new()));
+
+#[cfg(feature = "embassy")]
+const EMBASSY_TICKS_PER_MILLISECOND: u64 = embassy_time_driver::TICK_HZ / 1_000;
+
+#[cfg(feature = "embassy")]
+const _: () = assert!(embassy_time_driver::TICK_HZ.is_multiple_of(1_000));
 
 fn start_state() -> StartState {
     start_state_opt().expect("hisi-rtos must be started before radio runtime use")
@@ -942,14 +949,28 @@ fn earliest_deadline(
 }
 
 #[cfg(feature = "embassy")]
-fn embassy_next_expiration(now: u64) -> Option<u64> {
-    let deadline = critical_section::with(|cs| {
+fn embassy_now_ticks() -> u64 {
+    start_state_opt()
+        .map(|state| (state.resources.monotonic_ms)().saturating_mul(EMBASSY_TICKS_PER_MILLISECOND))
+        .unwrap_or(0)
+}
+
+#[cfg(feature = "embassy")]
+fn embassy_next_expiration(now_ms: u64) -> Option<u64> {
+    let now_ticks = now_ms.saturating_mul(EMBASSY_TICKS_PER_MILLISECOND);
+    let deadline_ticks = critical_section::with(|cs| {
         EMBASSY_TIME_QUEUE
             .borrow(cs)
             .borrow_mut()
-            .next_expiration(now)
+            .next_expiration(now_ticks)
     });
-    (deadline != u64::MAX).then_some(deadline)
+    if deadline_ticks == u64::MAX {
+        return None;
+    }
+    let remaining_ticks = deadline_ticks.saturating_sub(now_ticks);
+    let delay_ms = remaining_ticks.saturating_add(EMBASSY_TICKS_PER_MILLISECOND - 1)
+        / EMBASSY_TICKS_PER_MILLISECOND;
+    Some(now_ms.saturating_add(delay_ms.max(1)))
 }
 
 #[cfg(not(feature = "embassy"))]
@@ -1027,9 +1048,7 @@ struct HisiEmbassyTimeDriver;
 #[cfg(feature = "embassy")]
 impl EmbassyTimeDriver for HisiEmbassyTimeDriver {
     fn now(&self) -> u64 {
-        start_state_opt()
-            .map(|state| (state.resources.monotonic_ms)())
-            .unwrap_or(0)
+        embassy_now_ticks()
     }
 
     fn schedule_wake(&self, at: u64, waker: &Waker) {
