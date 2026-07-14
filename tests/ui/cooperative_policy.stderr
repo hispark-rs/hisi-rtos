@@ -1,0 +1,5 @@
+error[E0599]: no method named `set_task_run_policy` found for reference `&RuntimeHandle<CooperativeOnly>` in the current scope
+ --> tests/ui/cooperative_policy.rs:6:20
+  |
+6 |     let _ = handle.set_task_run_policy(
+  |             -------^^^^^^^^^^^^^^^^^^^ method not found in `&RuntimeHandle<CooperativeOnly>`
