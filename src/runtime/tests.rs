@@ -42,6 +42,40 @@ fn idle_is_selected_only_when_the_ready_queues_are_empty() {
 }
 
 #[test]
+fn idle_yield_hands_off_without_entering_the_ready_queue() {
+    let mut scheduler = Sched::new();
+    scheduler.current = IDLE_SLOT;
+    scheduler.tasks[IDLE_SLOT].state = State::Running;
+    ready_task(&mut scheduler, IDLE_SLOT + 1, 4);
+
+    assert_eq!(
+        scheduler.take_yield_target(IDLE_SLOT, 0),
+        Some(IDLE_SLOT + 1)
+    );
+    assert_eq!(scheduler.tasks[IDLE_SLOT].state, State::Ready);
+    assert_eq!(scheduler.ready_pop(), NIL);
+}
+
+#[test]
+fn timer_wakeup_preempts_idle_without_queueing_idle() {
+    let mut scheduler = Sched::new();
+    scheduler.started = true;
+    scheduler.current = IDLE_SLOT;
+    scheduler.tasks[IDLE_SLOT].state = State::Running;
+    scheduler.tasks[IDLE_SLOT + 1].state = State::Sleeping;
+    scheduler.tasks[IDLE_SLOT + 1].priority = 4;
+    scheduler.tasks[IDLE_SLOT + 1].wake_at = 10;
+
+    assert_eq!(scheduler.on_timer(10, NonZeroU32::new(100).unwrap()), None);
+    assert_eq!(
+        scheduler.take_irq_epilogue_target(0, 10),
+        Some((IDLE_SLOT, IDLE_SLOT + 1))
+    );
+    assert_eq!(scheduler.tasks[IDLE_SLOT].state, State::Ready);
+    assert_eq!(scheduler.ready_pop(), NIL);
+}
+
+#[test]
 fn scheduler_lock_rejects_switching_or_blocking_entry_points() {
     let mut scheduler = Sched::new();
     scheduler.tasks[0].state = State::Running;
@@ -94,13 +128,15 @@ fn ready_task_can_move_between_priority_queues() {
 #[test]
 fn cooperative_yield_hands_off_before_requeueing_higher_priority_task() {
     let mut scheduler = Sched::new();
-    scheduler.current = 1;
-    scheduler.tasks[1].state = State::Running;
-    scheduler.tasks[1].priority = 2;
-    ready_task(&mut scheduler, 2, 8);
+    let current = IDLE_SLOT + 1;
+    let next = IDLE_SLOT + 2;
+    scheduler.current = current;
+    scheduler.tasks[current].state = State::Running;
+    scheduler.tasks[current].priority = 2;
+    ready_task(&mut scheduler, next, 8);
 
-    assert_eq!(scheduler.take_yield_target(1, 0), Some(2));
-    assert_eq!(scheduler.ready_pop(), 1);
+    assert_eq!(scheduler.take_yield_target(current, 0), Some(next));
+    assert_eq!(scheduler.ready_pop(), current);
 }
 
 #[test]
@@ -567,20 +603,21 @@ fn forever_semaphore_wait_is_not_treated_as_an_expired_deadline() {
 fn timed_semaphore_wait_wakes_only_after_its_deadline() {
     let semaphore = Semaphore::new(0);
     let mut scheduler = Sched::new();
-    scheduler.tasks[1].state = State::Blocked;
-    scheduler.tasks[1].waiting_sem = core::ptr::addr_of!(semaphore) as usize;
-    scheduler.tasks[1].wake_at = 10;
+    let waiter = IDLE_SLOT + 1;
+    scheduler.tasks[waiter].state = State::Blocked;
+    scheduler.tasks[waiter].waiting_sem = core::ptr::addr_of!(semaphore) as usize;
+    scheduler.tasks[waiter].wake_at = 10;
     unsafe {
-        (*semaphore.inner.get()).wait_head = 1;
-        (*semaphore.inner.get()).wait_tail = 1;
+        (*semaphore.inner.get()).wait_head = waiter;
+        (*semaphore.inner.get()).wait_tail = waiter;
     }
 
     scheduler.wake_sleepers(9);
-    assert!(matches!(scheduler.tasks[1].state, State::Blocked));
+    assert!(matches!(scheduler.tasks[waiter].state, State::Blocked));
     scheduler.wake_sleepers(10);
 
-    assert!(matches!(scheduler.tasks[1].state, State::Ready));
-    assert_eq!(scheduler.ready_pop(), 1);
+    assert!(matches!(scheduler.tasks[waiter].state, State::Ready));
+    assert_eq!(scheduler.ready_pop(), waiter);
     assert_eq!(scheduler.diagnostics.semaphore_timeouts, 1);
 }
 

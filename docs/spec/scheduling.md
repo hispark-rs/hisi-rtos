@@ -18,8 +18,9 @@ evidence in `requirements.toml`.
 - **RTOS-STATE-002:** On a single hart, at most one task is `Running`.
 - **RTOS-STATE-003:** Slot 0 adopts the caller and slot 1 is an always-eligible,
   lowest-priority idle fallback. It does not enter the ordinary ready queues or
-  participate in FIFO/time-slice policy. Dynamic task allocation cannot consume
-  either reserved slot, so budget exhaustion never runs a throttled task. The
+  participate in FIFO/time-slice policy. A voluntary idle handoff leaves it
+  eligible without queueing it. Dynamic task allocation cannot consume either
+  reserved slot, so budget exhaustion never runs a throttled task. The
   current compatibility profile exposes 15 dynamic slots in addition to these
   two internal slots. The first 15 dynamic allocations succeed when storage is
   otherwise available; the next returns `NoTaskSlots`.
@@ -36,7 +37,9 @@ switched.
 - **RTOS-SCHED-002:** `Cooperative` permits switches only at explicit
   yield/block/sleep/exit or another explicit scheduler handoff. An IRQ wake or
   higher-priority ready task records work but does not immediately preempt the
-  current cooperative task. It has no equal-priority time slice.
+  current cooperative user task. Idle is the fallback exception: the outermost
+  IRQ epilogue immediately replaces a running idle task when ordinary work is
+  ready. `Cooperative` has no equal-priority time slice.
 - **RTOS-SCHED-003:** `Preemptive { time_slice }` permits a higher-priority ready
   task to preempt and equal-priority round-robin after that non-zero slice expires.
 - **RTOS-SCHED-004:** `Budgeted(spec)` has cooperative switching semantics and a

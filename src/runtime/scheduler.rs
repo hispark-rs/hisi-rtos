@@ -292,7 +292,9 @@ impl Sched {
     pub(super) fn make_ready(&mut self, task: usize, now: u64) {
         self.tasks[task].state = State::Ready;
         self.tasks[task].metrics.on_ready(now);
-        self.ready_push(task);
+        if task != IDLE_SLOT {
+            self.ready_push(task);
+        }
     }
     pub(super) fn ready_pop(&mut self) -> usize {
         for priority in 0..PRIORITY_LEVELS {
@@ -459,8 +461,18 @@ impl Sched {
         let current = self.current;
         if self.tasks[current].state != State::Running
             || self.tasks[current].scheduler_lock_depth != 0
-            || !matches!(self.tasks[current].run_policy, RunPolicy::Preemptive { .. })
         {
+            return None;
+        }
+        if current == IDLE_SLOT {
+            let next = self.ready_pop();
+            if next == NIL {
+                return None;
+            }
+            self.make_ready(current, now);
+            return Some((current, next));
+        }
+        if !matches!(self.tasks[current].run_policy, RunPolicy::Preemptive { .. }) {
             return None;
         }
         let current_priority = self.ready_priority(current);
