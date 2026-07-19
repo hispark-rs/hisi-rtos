@@ -624,15 +624,13 @@ fn timed_semaphore_wait_wakes_only_after_its_deadline() {
 #[test]
 fn semaphore_with_waiters_cannot_be_destroyed() {
     let semaphore = Semaphore::new(0);
-    assert!(!super::driver::semaphore_has_waiters(&semaphore));
+    // SAFETY: this test has exclusive access to the local semaphore.
+    let state = unsafe { &mut *semaphore.inner.get() };
+    assert!(!super::driver::semaphore_state_has_waiters(state));
 
-    // SAFETY: this test has exclusive access to the local semaphore and only
-    // constructs the minimum intrusive-list state inspected by destroy.
-    unsafe {
-        (*semaphore.inner.get()).wait_head = IDLE_SLOT + 1;
-        (*semaphore.inner.get()).wait_tail = IDLE_SLOT + 1;
-    }
-    assert!(super::driver::semaphore_has_waiters(&semaphore));
+    state.wait_head = IDLE_SLOT + 1;
+    state.wait_tail = IDLE_SLOT + 1;
+    assert!(super::driver::semaphore_state_has_waiters(state));
 }
 
 #[test]

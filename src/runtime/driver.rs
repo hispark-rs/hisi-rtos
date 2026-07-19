@@ -14,12 +14,16 @@ fn mutex_from_handle(handle: MutexHandle) -> &'static RtosMutex {
     unsafe { &*pointer }
 }
 
-pub(super) fn semaphore_has_waiters(semaphore: &Semaphore) -> bool {
+pub(super) fn semaphore_state_has_waiters(state: &SemState) -> bool {
+    state.wait_head != NIL || state.wait_tail != NIL
+}
+
+fn semaphore_has_waiters(semaphore: &Semaphore) -> bool {
     critical_section::with(|_| {
         // SAFETY: all semaphore state is serialized by the scheduler critical
         // section on this single-hart runtime.
         let state = unsafe { &*semaphore.inner.get() };
-        state.wait_head != NIL || state.wait_tail != NIL
+        semaphore_state_has_waiters(state)
     })
 }
 
