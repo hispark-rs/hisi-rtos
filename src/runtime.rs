@@ -39,7 +39,8 @@ mod scheduler;
 use scheduler::{Sched, State, TaskFn, Tcb};
 mod sync;
 use sync::{
-    RtosMutex, Semaphore, enqueue_mutex_waiter, enqueue_waiter, remove_mutex_waiter, remove_waiter,
+    RtosMutex, SemState, Semaphore, enqueue_mutex_waiter, enqueue_waiter, remove_mutex_waiter,
+    remove_waiter,
 };
 #[cfg(test)]
 use sync::{release_mutex_locked, release_semaphore_locked};
