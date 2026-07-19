@@ -13,9 +13,10 @@ jobs:
         with:
           toolchain: nightly-2026-07-09
           components: rustfmt, clippy
+      - uses: astral-sh/setup-uv@v6
       - run: rustup component add rust-src
       - run: cargo fmt --all -- --check
-      - run: python3 scripts/check-requirements.py
+      - run: uv run scripts/check-requirements.py
       - run: cargo test --locked --target x86_64-unknown-linux-gnu
       - run: cargo clippy -Zbuild-std=core --target riscv32imfc-unknown-none-elf -- -D warnings
       - run: cargo build -Zbuild-std=core --target riscv32imfc-unknown-none-elf
