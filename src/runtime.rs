@@ -59,12 +59,12 @@ use embassy_time_driver::Driver as EmbassyTimeDriver;
 #[cfg(feature = "embassy")]
 use embassy_time_queue_utils::Queue as EmbassyTimeQueue;
 use hisi_rf_rtos_driver::{
-    Error as DriverError, MutexHandle, Runtime, SemaphoreHandle, TaskConfig, WaitOutcome,
-    WaitTimeout,
+    Error as DriverError, MutexHandle, Runtime, RuntimeContract, SemaphoreHandle, TaskConfig,
+    TaskPriority, WaitOutcome, WaitTimeout,
 };
 
-/// LiteOS-compatible priority levels: 0 is highest, 31 is lowest.
-const PRIORITY_LEVELS: usize = 32;
+/// Contract-v1 priority levels: 0 is highest, 31 is lowest.
+const PRIORITY_LEVELS: usize = hisi_rf_rtos_driver::TASK_PRIORITY_LEVELS as usize;
 /// Reserved scheduler slot for the always-eligible idle thread.
 const IDLE_SLOT: usize = 1;
 const IDLE_STACK_SIZE: usize = 2048;

@@ -15,20 +15,22 @@ fn mutex_from_handle(handle: MutexHandle) -> &'static RtosMutex {
 }
 
 impl Runtime for HisiRuntime {
+    fn contract(&self) -> RuntimeContract {
+        RuntimeContract::V1
+    }
+
     fn spawn(
         &self,
         entry: hisi_rf_rtos_driver::TaskEntry,
         arg: *mut c_void,
         config: TaskConfig,
     ) -> Result<TaskId, DriverError> {
-        if config.priority as usize >= PRIORITY_LEVELS {
-            return Err(DriverError::Runtime);
-        }
+        let priority = config.priority.into_raw();
         let slot = spawn(
             entry,
             arg,
             config.stack_size.get(),
-            config.priority,
+            priority,
             start_state().config.radio_task_policy,
         )?;
         let generation =
@@ -51,10 +53,8 @@ impl Runtime for HisiRuntime {
         encode_task_id(slot, generation)
     }
 
-    fn set_task_priority(&self, task: TaskId, priority: u8) -> Result<(), DriverError> {
-        if priority as usize >= PRIORITY_LEVELS {
-            return Err(DriverError::Runtime);
-        }
+    fn set_task_priority(&self, task: TaskId, priority: TaskPriority) -> Result<(), DriverError> {
+        let priority = priority.into_raw();
         let (slot, generation) = decode_task_id(task)?;
         critical_section::with(|cs| {
             let scheduler = &mut *SCHED.borrow_ref_mut(cs);
