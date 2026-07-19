@@ -59,7 +59,8 @@ impl DeterministicBackend {
         Ok(match self.scheduler.tasks[Self::slot(actor)?].state {
             State::Ready => ActorState::Ready,
             State::Running => ActorState::Running,
-            State::Blocked | State::Sleeping | State::Throttled => ActorState::Blocked,
+            State::Blocked | State::Throttled => ActorState::Blocked,
+            State::Sleeping => ActorState::Sleeping,
             State::Free => ActorState::Exited,
         })
     }
@@ -182,6 +183,16 @@ impl Backend for DeterministicBackend {
                 self.interrupt_depth -= 1;
                 if self.interrupt_depth == 0 {
                     self.scheduler.interrupt_exit(self.now);
+                    if let Some((previous, next)) = self
+                        .scheduler
+                        .take_irq_epilogue_target(self.interrupt_depth, self.now)
+                    {
+                        self.switch(previous, next);
+                        return self.observation(
+                            Some(Self::actor(previous)?),
+                            ActionOutcome::ContextSwitched,
+                        );
+                    }
                 }
                 self.observation(None, ActionOutcome::Completed)
             }
@@ -190,7 +201,32 @@ impl Backend for DeterministicBackend {
                 self.scheduler.wake_sleepers(self.now);
                 self.observation(None, ActionOutcome::Completed)
             }
-            Action::ExitTask => Err(DriverError::Runtime),
+            Action::Sleep { milliseconds } => {
+                if milliseconds == 0 {
+                    return Err(DriverError::InvalidContext);
+                }
+                let previous = self.scheduler.current;
+                self.scheduler.tasks[previous].state = State::Sleeping;
+                self.scheduler.tasks[previous].wake_at =
+                    self.now.saturating_add(u64::from(milliseconds));
+                let next = self.scheduler.ready_pop_or_idle();
+                if next == IDLE_SLOT {
+                    return Err(DriverError::Runtime);
+                }
+                self.switch(previous, next);
+                self.observation(Some(Self::actor(previous)?), ActionOutcome::ContextSwitched)
+            }
+            Action::Observe { actor } => self.observation(Some(actor), ActionOutcome::Completed),
+            Action::ExitTask => {
+                let previous = self.scheduler.current;
+                self.scheduler.tasks[previous] = Tcb::empty();
+                let next = self.scheduler.ready_pop_or_idle();
+                if next == IDLE_SLOT {
+                    return Err(DriverError::Runtime);
+                }
+                self.switch(previous, next);
+                self.observation(Some(Self::actor(previous)?), ActionOutcome::ContextSwitched)
+            }
         }
     }
 }
@@ -206,5 +242,8 @@ fn runtime_v1_executes_shared_conformance_scenarios() {
     assert!(json.contains("\"schema_version\":1"));
     assert!(json.contains("\"priority_then_fifo\""));
     assert!(json.contains("\"nested_scheduler_lock\""));
+    assert!(json.contains("\"sleep_deadline\""));
+    assert!(json.contains("\"nested_interrupt_exit\""));
+    assert!(json.contains("\"task_exit_and_reuse\""));
     assert!(!json.contains("\"status\":\"failed\""));
 }
