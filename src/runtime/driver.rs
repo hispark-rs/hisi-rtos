@@ -14,6 +14,15 @@ fn mutex_from_handle(handle: MutexHandle) -> &'static RtosMutex {
     unsafe { &*pointer }
 }
 
+pub(super) fn semaphore_has_waiters(semaphore: &Semaphore) -> bool {
+    critical_section::with(|_| {
+        // SAFETY: all semaphore state is serialized by the scheduler critical
+        // section on this single-hart runtime.
+        let state = unsafe { &*semaphore.inner.get() };
+        state.wait_head != NIL || state.wait_tail != NIL
+    })
+}
+
 impl Runtime for HisiRuntime {
     fn contract(&self) -> RuntimeContract {
         RuntimeContract::V1
@@ -147,6 +156,9 @@ impl Runtime for HisiRuntime {
     }
 
     unsafe fn semaphore_destroy(&self, semaphore: SemaphoreHandle) -> Result<(), DriverError> {
+        if semaphore_has_waiters(semaphore_from_handle(semaphore)) {
+            return Err(DriverError::InvalidContext);
+        }
         deallocate(semaphore.into_raw().get() as *mut u8);
         Ok(())
     }

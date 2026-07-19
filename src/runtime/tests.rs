@@ -622,6 +622,20 @@ fn timed_semaphore_wait_wakes_only_after_its_deadline() {
 }
 
 #[test]
+fn semaphore_with_waiters_cannot_be_destroyed() {
+    let semaphore = Semaphore::new(0);
+    assert!(!super::driver::semaphore_has_waiters(&semaphore));
+
+    // SAFETY: this test has exclusive access to the local semaphore and only
+    // constructs the minimum intrusive-list state inspected by destroy.
+    unsafe {
+        (*semaphore.inner.get()).wait_head = IDLE_SLOT + 1;
+        (*semaphore.inner.get()).wait_tail = IDLE_SLOT + 1;
+    }
+    assert!(super::driver::semaphore_has_waiters(&semaphore));
+}
+
+#[test]
 fn semaphore_waiters_are_priority_fifo_and_reorder_on_priority_change() {
     let semaphore = Semaphore::new(0);
     let mut scheduler = Sched::new();
