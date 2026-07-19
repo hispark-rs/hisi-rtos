@@ -90,7 +90,14 @@ impl DeterministicBackend {
     }
 
     fn sleep_current(&mut self, milliseconds: u32) -> Result<Observation, DriverError> {
-        let previous = self.scheduler.current;
+        let previous = match self.scheduler.current_switch_guard() {
+            Ok(previous) => previous,
+            Err(DriverError::InvalidContext) => {
+                return self
+                    .observation(None, ActionOutcome::Rejected(DriverError::InvalidContext));
+            }
+            Err(error) => return Err(error),
+        };
         self.scheduler.tasks[previous].state = State::Sleeping;
         self.scheduler.tasks[previous].wake_at = self.now.saturating_add(u64::from(milliseconds));
         let next = self.scheduler.ready_pop_or_idle();
@@ -215,14 +222,21 @@ impl Backend for DeterministicBackend {
             }
             Action::UnlockScheduler => {
                 let previous = self.scheduler.current;
-                if let Some((previous, next)) = self
-                    .scheduler
-                    .unlock_current_and_take_preemption(self.now)?
-                {
-                    self.switch(previous, next);
-                    self.observation(Some(Self::actor(previous)?), ActionOutcome::ContextSwitched)
-                } else {
-                    self.observation(Some(Self::actor(previous)?), ActionOutcome::Completed)
+                match self.scheduler.unlock_current_and_take_preemption(self.now) {
+                    Ok(Some((previous, next))) => {
+                        self.switch(previous, next);
+                        self.observation(
+                            Some(Self::actor(previous)?),
+                            ActionOutcome::ContextSwitched,
+                        )
+                    }
+                    Ok(None) => {
+                        self.observation(Some(Self::actor(previous)?), ActionOutcome::Completed)
+                    }
+                    Err(DriverError::InvalidContext) => {
+                        self.observation(None, ActionOutcome::Rejected(DriverError::InvalidContext))
+                    }
+                    Err(error) => Err(error),
                 }
             }
             Action::EnterInterrupt => {
@@ -237,7 +251,8 @@ impl Backend for DeterministicBackend {
             }
             Action::ExitInterrupt => {
                 if self.interrupt_depth == 0 {
-                    return Err(DriverError::InvalidContext);
+                    return self
+                        .observation(None, ActionOutcome::Rejected(DriverError::InvalidContext));
                 }
                 self.interrupt_depth -= 1;
                 if self.interrupt_depth == 0 {
@@ -289,6 +304,15 @@ impl Backend for DeterministicBackend {
                 let Some(deadline) = deadline else {
                     return self.observation(None, ActionOutcome::TimedOut);
                 };
+                if let Err(error) = self.scheduler.current_switch_guard() {
+                    return match error {
+                        DriverError::InvalidContext => self.observation(
+                            None,
+                            ActionOutcome::Rejected(DriverError::InvalidContext),
+                        ),
+                        error => Err(error),
+                    };
+                }
                 self.scheduler.tasks[previous].state = State::Blocked;
                 self.scheduler.tasks[previous].wake_at = deadline;
                 self.scheduler.tasks[previous].waiting_sem =
@@ -340,6 +364,15 @@ impl Backend for DeterministicBackend {
                 let Some(deadline) = deadline else {
                     return self.observation(None, ActionOutcome::TimedOut);
                 };
+                if let Err(error) = self.scheduler.current_switch_guard() {
+                    return match error {
+                        DriverError::InvalidContext => self.observation(
+                            None,
+                            ActionOutcome::Rejected(DriverError::InvalidContext),
+                        ),
+                        error => Err(error),
+                    };
+                }
                 let owner = state.owner;
                 self.scheduler.tasks[current].state = State::Blocked;
                 self.scheduler.tasks[current].wake_at = deadline;
@@ -410,7 +443,7 @@ fn runtime_v1_executes_shared_conformance_scenarios() {
 
     let mut json = std::string::String::new();
     report.write_json(&mut json).unwrap();
-    assert!(json.contains("\"schema_version\":3"));
+    assert!(json.contains("\"schema_version\":4"));
     assert!(json.contains("\"execution_profile\":{\"revision\":1,\"modes\":14}"));
     assert!(json.contains("\"priority_then_fifo\""));
     assert!(json.contains("\"nested_scheduler_lock\""));
@@ -425,5 +458,8 @@ fn runtime_v1_executes_shared_conformance_scenarios() {
     assert!(json.contains("\"wait_forever\""));
     assert!(json.contains("\"same_deadline_fifo\""));
     assert!(json.contains("\"semaphore_highest_priority_waiter\""));
+    assert!(json.contains("\"unbalanced_scheduler_unlock\""));
+    assert!(json.contains("\"unbalanced_interrupt_exit\""));
+    assert!(json.contains("\"blocking_in_scheduler_lock\""));
     assert!(!json.contains("\"status\":\"failed\""));
 }
