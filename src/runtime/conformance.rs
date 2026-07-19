@@ -122,6 +122,10 @@ impl Backend for DeterministicBackend {
         RuntimeContract::V1
     }
 
+    fn execution_profile(&self) -> RuntimeExecutionProfile {
+        RuntimeExecutionProfile::V1_PORTED
+    }
+
     fn revision(&self) -> &'static str {
         env!("CARGO_PKG_VERSION")
     }
@@ -399,7 +403,8 @@ fn runtime_v1_executes_shared_conformance_scenarios() {
 
     let mut json = std::string::String::new();
     report.write_json(&mut json).unwrap();
-    assert!(json.contains("\"schema_version\":1"));
+    assert!(json.contains("\"schema_version\":2"));
+    assert!(json.contains("\"execution_profile\":{\"revision\":1,\"modes\":14}"));
     assert!(json.contains("\"priority_then_fifo\""));
     assert!(json.contains("\"nested_scheduler_lock\""));
     assert!(json.contains("\"sleep_deadline\""));

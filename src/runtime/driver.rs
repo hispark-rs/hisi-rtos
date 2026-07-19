@@ -19,6 +19,14 @@ impl Runtime for HisiRuntime {
         RuntimeContract::V1
     }
 
+    fn execution_profile(&self) -> RuntimeExecutionProfile {
+        if start_state().port.is_some() {
+            RuntimeExecutionProfile::V1_PORTED
+        } else {
+            RuntimeExecutionProfile::V1_PORTLESS_COOPERATIVE
+        }
+    }
+
     fn spawn(
         &self,
         entry: hisi_rf_rtos_driver::TaskEntry,
