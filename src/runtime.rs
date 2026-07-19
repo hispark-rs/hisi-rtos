@@ -689,4 +689,6 @@ impl RuntimeHandle<Ported> {
 }
 
 #[cfg(test)]
+mod conformance;
+#[cfg(test)]
 mod tests;
