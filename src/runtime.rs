@@ -38,9 +38,9 @@ use crate::{RunPolicy, TaskId};
 mod scheduler;
 use scheduler::{Sched, State, TaskFn, Tcb};
 mod sync;
-#[cfg(test)]
-use sync::release_mutex_locked;
 use sync::{RtosMutex, Semaphore, enqueue_mutex_waiter, remove_mutex_waiter, remove_waiter};
+#[cfg(test)]
+use sync::{enqueue_waiter, release_mutex_locked, release_semaphore_locked};
 mod time;
 #[cfg(test)]
 use time::{claim_timer_rearm_generation, earliest_deadline};

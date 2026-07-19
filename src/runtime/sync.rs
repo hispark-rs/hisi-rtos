@@ -19,7 +19,7 @@ pub(super) struct SemState {
     pub(super) wait_tail: usize,
 }
 
-fn enqueue_waiter(sched: &mut Sched, state: &mut SemState, task: usize) {
+pub(super) fn enqueue_waiter(sched: &mut Sched, state: &mut SemState, task: usize) {
     sched.tasks[task].next = NIL;
     if state.wait_tail == NIL {
         state.wait_head = task;
@@ -170,21 +170,7 @@ impl Semaphore {
             let s = &mut *SCHED.borrow_ref_mut(cs);
             // SAFETY: exclusive under the critical section.
             let st = unsafe { &mut *self.inner.get() };
-            let w = st.wait_head;
-            if w != NIL {
-                st.wait_head = s.tasks[w].next;
-                if st.wait_head == NIL {
-                    st.wait_tail = NIL;
-                }
-                s.tasks[w].next = NIL;
-                s.tasks[w].wake_at = 0;
-                s.tasks[w].waiting_sem = 0;
-                s.tasks[w].sem_granted = true;
-                s.make_ready(w, now);
-                s.diagnostics.semaphore_wakes = s.diagnostics.semaphore_wakes.saturating_add(1);
-            } else {
-                st.count += 1;
-            }
+            release_semaphore_locked(s, st, now);
             let interrupt_depth = INTERRUPT_DEPTH.borrow(cs).get();
             if interrupt_depth == 0 && machine_interrupts_enabled {
                 s.take_preemption_target(now)
@@ -202,6 +188,26 @@ impl Semaphore {
         rearm_timer();
         Ok(())
     }
+}
+
+pub(super) fn release_semaphore_locked(sched: &mut Sched, state: &mut SemState, now: u64) -> usize {
+    let waiter = state.wait_head;
+    if waiter == NIL {
+        state.count += 1;
+        return NIL;
+    }
+
+    state.wait_head = sched.tasks[waiter].next;
+    if state.wait_head == NIL {
+        state.wait_tail = NIL;
+    }
+    sched.tasks[waiter].next = NIL;
+    sched.tasks[waiter].wake_at = 0;
+    sched.tasks[waiter].waiting_sem = 0;
+    sched.tasks[waiter].sem_granted = true;
+    sched.make_ready(waiter, now);
+    sched.diagnostics.semaphore_wakes = sched.diagnostics.semaphore_wakes.saturating_add(1);
+    waiter
 }
 
 // Recursive mutex with priority-ordered waiters and priority inheritance.
