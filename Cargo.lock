@@ -87,9 +87,9 @@ dependencies = [
 
 [[package]]
 name = "hisi-rf-rtos-driver"
-version = "0.1.0-alpha.11"
+version = "0.1.0-alpha.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adf588c7ff0c6ab0311dafcb591aaec3924d3f2cc72d0422dec9ffd580c02084"
+checksum = "1779e6566d6ac1625d2f8b4fc20d8bb79e9510dca658258780f8040c752ceb77"
 dependencies = [
  "critical-section",
 ]
