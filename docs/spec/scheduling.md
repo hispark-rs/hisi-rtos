@@ -117,6 +117,10 @@ are non-zero and `capacity <= replenishment_period`.
 - **RTOS-WAIT-002:** A semaphore grant is direct and cannot be stolen by a third
   task before the selected waiter runs. The selected waiter has the highest
   effective priority; waiters at the same priority remain FIFO.
+- **RTOS-WAIT-003:** Destroying a semaphore with waiters, or a mutex with an owner
+  or waiters, fails closed with `InvalidContext`. The contract remains unsafe:
+  callers must still exclude concurrent and future use. Contract v1 does not
+  promise detection of a stale or duplicate opaque resource handle.
 - **RTOS-MUTEX-001:** Recursive mutex unlock is owner-only. Final unlock directly
   hands ownership to the highest-priority FIFO waiter.
 - **RTOS-MUTEX-002:** Effective priority is the minimum numeric value of base

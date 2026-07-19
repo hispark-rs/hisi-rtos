@@ -162,6 +162,11 @@ implementation = ["src/runtime/sync.rs:Semaphore::up", "src/runtime/scheduler.rs
 host_tests = ["tests::timed_semaphore_wait_wakes_only_after_its_deadline"]
 
 [[requirement]]
+id = "RTOS-WAIT-003"
+implementation = ["src/runtime/driver.rs:semaphore_state_has_waiters", "src/runtime/driver.rs:mutex_state_is_busy"]
+host_tests = ["tests::semaphore_with_waiters_cannot_be_destroyed", "tests::owned_or_waited_mutex_cannot_be_destroyed"]
+
+[[requirement]]
 id = "RTOS-MUTEX-001"
 implementation = ["src/runtime/sync.rs:RtosMutex::unlock", "src/runtime/sync.rs:pop_mutex_waiter"]
 host_tests = ["tests::mutex_handoff_transfers_remaining_inheritance_to_new_owner"]

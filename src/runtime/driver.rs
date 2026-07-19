@@ -27,6 +27,10 @@ fn semaphore_has_waiters(semaphore: &Semaphore) -> bool {
     })
 }
 
+pub(super) fn mutex_state_is_busy(state: &MutexState) -> bool {
+    state.owner != NIL || state.wait_head != NIL || state.wait_tail != NIL
+}
+
 impl Runtime for HisiRuntime {
     fn contract(&self) -> RuntimeContract {
         RuntimeContract::V1
@@ -201,7 +205,7 @@ impl Runtime for HisiRuntime {
         let busy = critical_section::with(|_| {
             // SAFETY: caller promises the handle is live during this check.
             let state = unsafe { &*mutex_from_handle(mutex).inner.get() };
-            state.owner != NIL || state.wait_head != NIL
+            mutex_state_is_busy(state)
         });
         if busy {
             return Err(DriverError::InvalidContext);

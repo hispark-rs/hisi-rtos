@@ -634,6 +634,22 @@ fn semaphore_with_waiters_cannot_be_destroyed() {
 }
 
 #[test]
+fn owned_or_waited_mutex_cannot_be_destroyed() {
+    let mutex = RtosMutex::new();
+    // SAFETY: this test has exclusive access to the local mutex.
+    let state = unsafe { &mut *mutex.inner.get() };
+    assert!(!super::driver::mutex_state_is_busy(state));
+
+    state.owner = IDLE_SLOT + 1;
+    assert!(super::driver::mutex_state_is_busy(state));
+    state.owner = NIL;
+
+    state.wait_head = IDLE_SLOT + 2;
+    state.wait_tail = IDLE_SLOT + 2;
+    assert!(super::driver::mutex_state_is_busy(state));
+}
+
+#[test]
 fn semaphore_waiters_are_priority_fifo_and_reorder_on_priority_change() {
     let semaphore = Semaphore::new(0);
     let mut scheduler = Sched::new();
