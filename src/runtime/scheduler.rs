@@ -359,12 +359,24 @@ impl Sched {
             return;
         }
         let ready = self.tasks[task].state == State::Ready;
+        let waiting_sem = self.tasks[task].waiting_sem;
         if ready {
             self.ready_remove(task);
+        }
+        if waiting_sem != 0 {
+            // SAFETY: a blocked task keeps the semaphore alive while queued;
+            // callers serialize scheduler and queue mutation.
+            let state = unsafe { &mut *(*(waiting_sem as *const Semaphore)).inner.get() };
+            remove_waiter(self, state, task);
         }
         self.tasks[task].priority = priority;
         if ready {
             self.ready_push(task);
+        }
+        if waiting_sem != 0 {
+            // SAFETY: same lifetime and serialization argument as removal.
+            let state = unsafe { &mut *(*(waiting_sem as *const Semaphore)).inner.get() };
+            enqueue_waiter(self, state, task);
         }
     }
 

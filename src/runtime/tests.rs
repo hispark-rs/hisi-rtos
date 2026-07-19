@@ -622,6 +622,38 @@ fn timed_semaphore_wait_wakes_only_after_its_deadline() {
 }
 
 #[test]
+fn semaphore_waiters_are_priority_fifo_and_reorder_on_priority_change() {
+    let semaphore = Semaphore::new(0);
+    let mut scheduler = Sched::new();
+    let low = IDLE_SLOT + 1;
+    let high_a = IDLE_SLOT + 2;
+    let high_b = IDLE_SLOT + 3;
+
+    for (task, priority) in [(low, 10), (high_a, 2), (high_b, 2)] {
+        scheduler.tasks[task].state = State::Blocked;
+        scheduler.tasks[task].base_priority = priority;
+        scheduler.tasks[task].priority = priority;
+        scheduler.tasks[task].waiting_sem = core::ptr::addr_of!(semaphore) as usize;
+        unsafe { enqueue_waiter(&mut scheduler, &mut *semaphore.inner.get(), task) };
+    }
+
+    let state = unsafe { &*semaphore.inner.get() };
+    assert_eq!(state.wait_head, high_a);
+    assert_eq!(scheduler.tasks[high_a].next, high_b);
+    assert_eq!(scheduler.tasks[high_b].next, low);
+
+    scheduler.set_effective_priority(low, 1);
+    let state = unsafe { &*semaphore.inner.get() };
+    assert_eq!(state.wait_head, low);
+    assert_eq!(scheduler.tasks[low].next, high_a);
+
+    let granted =
+        unsafe { release_semaphore_locked(&mut scheduler, &mut *semaphore.inner.get(), 0) };
+    assert_eq!(granted, low);
+    assert!(scheduler.tasks[low].sem_granted);
+}
+
+#[test]
 fn duplicate_mutex_waiters_keep_owner_inherited_until_both_leave() {
     let mut scheduler = Sched::new();
     scheduler.tasks[0].state = State::Running;

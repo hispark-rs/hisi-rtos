@@ -115,7 +115,8 @@ are non-zero and `capacity <= replenishment_period`.
 - **RTOS-WAIT-001:** Signal, timeout, interrupt wake, and cancellation compete at
   one scheduler-serialized linearization point; one wake reason wins.
 - **RTOS-WAIT-002:** A semaphore grant is direct and cannot be stolen by a third
-  task before the selected waiter runs.
+  task before the selected waiter runs. The selected waiter has the highest
+  effective priority; waiters at the same priority remain FIFO.
 - **RTOS-MUTEX-001:** Recursive mutex unlock is owner-only. Final unlock directly
   hands ownership to the highest-priority FIFO waiter.
 - **RTOS-MUTEX-002:** Effective priority is the minimum numeric value of base

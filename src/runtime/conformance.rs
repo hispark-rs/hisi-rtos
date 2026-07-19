@@ -79,6 +79,28 @@ impl DeterministicBackend {
         self.remembered_identity = None;
     }
 
+    fn yield_current(&mut self) -> Result<Observation, DriverError> {
+        let previous = self.scheduler.current;
+        if let Some(next) = self.scheduler.take_yield_target(previous, self.now) {
+            self.switch(previous, next);
+            self.observation(Some(Self::actor(previous)?), ActionOutcome::ContextSwitched)
+        } else {
+            self.observation(Some(Self::actor(previous)?), ActionOutcome::Completed)
+        }
+    }
+
+    fn sleep_current(&mut self, milliseconds: u32) -> Result<Observation, DriverError> {
+        let previous = self.scheduler.current;
+        self.scheduler.tasks[previous].state = State::Sleeping;
+        self.scheduler.tasks[previous].wake_at = self.now.saturating_add(u64::from(milliseconds));
+        let next = self.scheduler.ready_pop_or_idle();
+        if next == IDLE_SLOT {
+            return Err(DriverError::Runtime);
+        }
+        self.switch(previous, next);
+        self.observation(Some(Self::actor(previous)?), ActionOutcome::ContextSwitched)
+    }
+
     fn wait_deadline(&self, wait: Wait) -> Option<u64> {
         match wait {
             Wait::NoWait => None,
@@ -181,15 +203,9 @@ impl Backend for DeterministicBackend {
                     },
                 )
             }
-            Action::Yield => {
-                let previous = self.scheduler.current;
-                if let Some(next) = self.scheduler.take_yield_target(previous, self.now) {
-                    self.switch(previous, next);
-                    self.observation(Some(Self::actor(previous)?), ActionOutcome::ContextSwitched)
-                } else {
-                    self.observation(Some(Self::actor(previous)?), ActionOutcome::Completed)
-                }
-            }
+            Action::Yield => self.yield_current(),
+            Action::Delay { milliseconds: 0 } => self.yield_current(),
+            Action::Delay { milliseconds } => self.sleep_current(milliseconds),
             Action::LockScheduler => {
                 self.scheduler.lock_current(self.now)?;
                 self.observation(
@@ -248,16 +264,7 @@ impl Backend for DeterministicBackend {
                 if milliseconds == 0 {
                     return Err(DriverError::InvalidContext);
                 }
-                let previous = self.scheduler.current;
-                self.scheduler.tasks[previous].state = State::Sleeping;
-                self.scheduler.tasks[previous].wake_at =
-                    self.now.saturating_add(u64::from(milliseconds));
-                let next = self.scheduler.ready_pop_or_idle();
-                if next == IDLE_SLOT {
-                    return Err(DriverError::Runtime);
-                }
-                self.switch(previous, next);
-                self.observation(Some(Self::actor(previous)?), ActionOutcome::ContextSwitched)
+                self.sleep_current(milliseconds)
             }
             Action::Observe { actor } => self.observation(Some(actor), ActionOutcome::Completed),
             Action::ExitTask => {
@@ -403,7 +410,7 @@ fn runtime_v1_executes_shared_conformance_scenarios() {
 
     let mut json = std::string::String::new();
     report.write_json(&mut json).unwrap();
-    assert!(json.contains("\"schema_version\":2"));
+    assert!(json.contains("\"schema_version\":3"));
     assert!(json.contains("\"execution_profile\":{\"revision\":1,\"modes\":14}"));
     assert!(json.contains("\"priority_then_fifo\""));
     assert!(json.contains("\"nested_scheduler_lock\""));
@@ -414,5 +421,9 @@ fn runtime_v1_executes_shared_conformance_scenarios() {
     assert!(json.contains("\"semaphore_timeout_cleanup\""));
     assert!(json.contains("\"mutex_priority_inheritance\""));
     assert!(json.contains("\"stale_task_identity\""));
+    assert!(json.contains("\"zero_delay_yields\""));
+    assert!(json.contains("\"wait_forever\""));
+    assert!(json.contains("\"same_deadline_fifo\""));
+    assert!(json.contains("\"semaphore_highest_priority_waiter\""));
     assert!(!json.contains("\"status\":\"failed\""));
 }

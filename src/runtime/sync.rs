@@ -20,13 +20,22 @@ pub(super) struct SemState {
 }
 
 pub(super) fn enqueue_waiter(sched: &mut Sched, state: &mut SemState, task: usize) {
-    sched.tasks[task].next = NIL;
-    if state.wait_tail == NIL {
+    let priority = sched.tasks[task].priority;
+    let mut previous = NIL;
+    let mut current = state.wait_head;
+    while current != NIL && sched.tasks[current].priority <= priority {
+        previous = current;
+        current = sched.tasks[current].next;
+    }
+    sched.tasks[task].next = current;
+    if previous == NIL {
         state.wait_head = task;
     } else {
-        sched.tasks[state.wait_tail].next = task;
+        sched.tasks[previous].next = task;
     }
-    state.wait_tail = task;
+    if current == NIL {
+        state.wait_tail = task;
+    }
 }
 
 pub(super) fn remove_waiter(sched: &mut Sched, state: &mut SemState, task: usize) {
