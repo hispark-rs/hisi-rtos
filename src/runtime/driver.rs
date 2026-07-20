@@ -1,30 +1,26 @@
 use super::*;
 
-fn semaphore_from_handle(handle: SemaphoreHandle) -> &'static Semaphore {
-    let pointer = handle.into_raw().get() as *const Semaphore;
-    // SAFETY: this backend creates handles only from heap-allocated Semaphore
-    // objects and the driver contract requires users to stop all access before
-    // destroy.
-    unsafe { &*pointer }
+fn resource_pointer(handle: NonZeroUsize, kind: ResourceKind) -> Result<NonZeroUsize, DriverError> {
+    critical_section::with(|cs| RESOURCE_HANDLES.borrow_ref(cs).resolve(handle, kind))
 }
 
-fn mutex_from_handle(handle: MutexHandle) -> &'static RtosMutex {
-    let pointer = handle.into_raw().get() as *const RtosMutex;
-    // SAFETY: this backend creates handles only from live RtosMutex allocations.
-    unsafe { &*pointer }
+fn semaphore_from_handle(handle: SemaphoreHandle) -> Result<&'static Semaphore, DriverError> {
+    let pointer = resource_pointer(handle.into_raw(), ResourceKind::Semaphore)?;
+    // SAFETY: the validated registry entry owns a live Semaphore allocation.
+    // The unsafe destroy contract excludes concurrent destruction while a safe
+    // operation is using this reference.
+    Ok(unsafe { &*(pointer.get() as *const Semaphore) })
+}
+
+fn mutex_from_handle(handle: MutexHandle) -> Result<&'static RtosMutex, DriverError> {
+    let pointer = resource_pointer(handle.into_raw(), ResourceKind::Mutex)?;
+    // SAFETY: the validated registry entry owns a live RtosMutex allocation and
+    // the unsafe destroy contract excludes concurrent destruction.
+    Ok(unsafe { &*(pointer.get() as *const RtosMutex) })
 }
 
 pub(super) fn semaphore_state_has_waiters(state: &SemState) -> bool {
     state.wait_head != NIL || state.wait_tail != NIL
-}
-
-fn semaphore_has_waiters(semaphore: &Semaphore) -> bool {
-    critical_section::with(|_| {
-        // SAFETY: all semaphore state is serialized by the scheduler critical
-        // section on this single-hart runtime.
-        let state = unsafe { &*semaphore.inner.get() };
-        semaphore_state_has_waiters(state)
-    })
 }
 
 pub(super) fn mutex_state_is_busy(state: &MutexState) -> bool {
@@ -136,8 +132,20 @@ impl Runtime for HisiRuntime {
         let raw = NonZeroUsize::new(pointer as usize).ok_or(DriverError::ResourceExhausted)?;
         // SAFETY: the RF allocator guarantees size/alignment for Semaphore.
         unsafe { pointer.write(Semaphore::new(count)) };
+        let handle = critical_section::with(|cs| {
+            RESOURCE_HANDLES
+                .borrow_ref_mut(cs)
+                .insert(raw, ResourceKind::Semaphore)
+        });
+        let handle = match handle {
+            Ok(handle) => handle,
+            Err(error) => {
+                deallocate(pointer.cast());
+                return Err(error);
+            }
+        };
         // SAFETY: `raw` identifies this live allocation until destroy.
-        Ok(unsafe { SemaphoreHandle::from_raw(raw) })
+        Ok(unsafe { SemaphoreHandle::from_raw(handle) })
     }
 
     fn semaphore_down(
@@ -151,7 +159,7 @@ impl Runtime for HisiRuntime {
             WaitTimeout::Forever => u32::MAX,
         };
         Ok(
-            if semaphore_from_handle(semaphore).down_timeout(timeout_ms)? {
+            if semaphore_from_handle(semaphore)?.down_timeout(timeout_ms)? {
                 WaitOutcome::Acquired
             } else {
                 WaitOutcome::TimedOut
@@ -160,14 +168,23 @@ impl Runtime for HisiRuntime {
     }
 
     fn semaphore_up(&self, semaphore: SemaphoreHandle) -> Result<(), DriverError> {
-        semaphore_from_handle(semaphore).up()
+        semaphore_from_handle(semaphore)?.up()
     }
 
     unsafe fn semaphore_destroy(&self, semaphore: SemaphoreHandle) -> Result<(), DriverError> {
-        if semaphore_has_waiters(semaphore_from_handle(semaphore)) {
-            return Err(DriverError::InvalidContext);
-        }
-        deallocate(semaphore.into_raw().get() as *mut u8);
+        let pointer = critical_section::with(|cs| {
+            let handles = &mut *RESOURCE_HANDLES.borrow_ref_mut(cs);
+            let pointer = handles.resolve(semaphore.into_raw(), ResourceKind::Semaphore)?;
+            // SAFETY: the registry entry was validated and queue access is
+            // serialized by this scheduler critical section.
+            let state = unsafe { &*(pointer.get() as *const Semaphore) }.inner.get();
+            // SAFETY: the critical section provides exclusive state access.
+            if semaphore_state_has_waiters(unsafe { &*state }) {
+                return Err(DriverError::InvalidContext);
+            }
+            handles.remove(semaphore.into_raw(), ResourceKind::Semaphore)
+        })?;
+        deallocate(pointer.get() as *mut u8);
         Ok(())
     }
 
@@ -176,8 +193,20 @@ impl Runtime for HisiRuntime {
         let raw = NonZeroUsize::new(pointer as usize).ok_or(DriverError::ResourceExhausted)?;
         // SAFETY: the RF allocator guarantees size/alignment for RtosMutex.
         unsafe { pointer.write(RtosMutex::new()) };
+        let handle = critical_section::with(|cs| {
+            RESOURCE_HANDLES
+                .borrow_ref_mut(cs)
+                .insert(raw, ResourceKind::Mutex)
+        });
+        let handle = match handle {
+            Ok(handle) => handle,
+            Err(error) => {
+                deallocate(pointer.cast());
+                return Err(error);
+            }
+        };
         // SAFETY: raw identifies the live allocation until destroy.
-        Ok(unsafe { MutexHandle::from_raw(raw) })
+        Ok(unsafe { MutexHandle::from_raw(handle) })
     }
 
     fn mutex_lock(
@@ -190,7 +219,7 @@ impl Runtime for HisiRuntime {
             WaitTimeout::Milliseconds(value) => value.get(),
             WaitTimeout::Forever => u32::MAX,
         };
-        Ok(if mutex_from_handle(mutex).lock(timeout_ms)? {
+        Ok(if mutex_from_handle(mutex)?.lock(timeout_ms)? {
             WaitOutcome::Acquired
         } else {
             WaitOutcome::TimedOut
@@ -198,19 +227,23 @@ impl Runtime for HisiRuntime {
     }
 
     fn mutex_unlock(&self, mutex: MutexHandle) -> Result<(), DriverError> {
-        mutex_from_handle(mutex).unlock()
+        mutex_from_handle(mutex)?.unlock()
     }
 
     unsafe fn mutex_destroy(&self, mutex: MutexHandle) -> Result<(), DriverError> {
-        let busy = critical_section::with(|_| {
-            // SAFETY: caller promises the handle is live during this check.
-            let state = unsafe { &*mutex_from_handle(mutex).inner.get() };
-            mutex_state_is_busy(state)
-        });
-        if busy {
-            return Err(DriverError::InvalidContext);
-        }
-        deallocate(mutex.into_raw().get() as *mut u8);
+        let pointer = critical_section::with(|cs| {
+            let handles = &mut *RESOURCE_HANDLES.borrow_ref_mut(cs);
+            let pointer = handles.resolve(mutex.into_raw(), ResourceKind::Mutex)?;
+            // SAFETY: the registry entry was validated and state access is
+            // serialized by this scheduler critical section.
+            let state = unsafe { &*(pointer.get() as *const RtosMutex) }.inner.get();
+            // SAFETY: the critical section provides exclusive state access.
+            if mutex_state_is_busy(unsafe { &*state }) {
+                return Err(DriverError::InvalidContext);
+            }
+            handles.remove(mutex.into_raw(), ResourceKind::Mutex)
+        })?;
+        deallocate(pointer.get() as *mut u8);
         Ok(())
     }
 }

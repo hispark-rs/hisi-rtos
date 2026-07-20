@@ -50,6 +50,8 @@ use time::{claim_timer_rearm_generation, earliest_deadline};
 use time::{now_ms, rearm_timer};
 pub use time::{on_software_interrupt, on_timer_interrupt, request_reschedule};
 mod driver;
+mod resource;
+use resource::{RESOURCE_HANDLE_CAPACITY, ResourceKind, ResourceTable};
 
 use core::cell::{Cell, RefCell, UnsafeCell};
 use core::ffi::c_void;
@@ -123,6 +125,8 @@ fn deallocate(pointer: *mut u8) {
 
 static SCHED: Mutex<RefCell<Sched>> = Mutex::new(RefCell::new(Sched::new()));
 static INTERRUPT_DEPTH: Mutex<Cell<u16>> = Mutex::new(Cell::new(0));
+static RESOURCE_HANDLES: Mutex<RefCell<ResourceTable<RESOURCE_HANDLE_CAPACITY>>> =
+    Mutex::new(RefCell::new(ResourceTable::new()));
 
 /// Marks entry into a target interrupt handler.
 ///

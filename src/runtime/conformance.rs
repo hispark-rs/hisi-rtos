@@ -2,7 +2,7 @@ use super::*;
 extern crate std;
 use hisi_rf_rtos_driver::conformance::{
     Action, ActionOutcome, ActorId, ActorState, Backend, ExecutionProfile, Observation,
-    V1_SCENARIOS, Wait, run_suite,
+    ResourceHandleRef, ResourceKind, V1_SCENARIOS, Wait, run_suite,
 };
 
 struct DeterministicBackend {
@@ -13,6 +13,9 @@ struct DeterministicBackend {
     semaphore: Semaphore,
     mutex: RtosMutex,
     remembered_identity: Option<TaskId>,
+    resource_generations: [u16; 2],
+    resource_live: [bool; 2],
+    remembered_resource_generations: [Option<u16>; 2],
 }
 
 impl DeterministicBackend {
@@ -25,6 +28,16 @@ impl DeterministicBackend {
             semaphore: Semaphore::new(0),
             mutex: RtosMutex::new(),
             remembered_identity: None,
+            resource_generations: [0; 2],
+            resource_live: [false; 2],
+            remembered_resource_generations: [None; 2],
+        }
+    }
+
+    const fn resource_index(kind: ResourceKind) -> usize {
+        match kind {
+            ResourceKind::Semaphore => 0,
+            ResourceKind::Mutex => 1,
         }
     }
 
@@ -77,6 +90,8 @@ impl DeterministicBackend {
             mutex.wait_tail = NIL;
         }
         self.remembered_identity = None;
+        self.resource_live = [false; 2];
+        self.remembered_resource_generations = [None; 2];
     }
 
     fn yield_current(&mut self) -> Result<Observation, DriverError> {
@@ -431,6 +446,48 @@ impl Backend for DeterministicBackend {
                 }
                 self.observation(None, ActionOutcome::StaleIdentityRejected)
             }
+            Action::CreateResource { kind } => {
+                let index = Self::resource_index(kind);
+                if self.resource_live[index] {
+                    return self
+                        .observation(None, ActionOutcome::Rejected(DriverError::InvalidContext));
+                }
+                self.resource_generations[index] =
+                    self.resource_generations[index].wrapping_add(1).max(1);
+                self.resource_live[index] = true;
+                self.observation(None, ActionOutcome::ResourceCreated)
+            }
+            Action::RememberResourceHandle { kind } => {
+                let index = Self::resource_index(kind);
+                if !self.resource_live[index] {
+                    return self
+                        .observation(None, ActionOutcome::Rejected(DriverError::InvalidHandle));
+                }
+                self.remembered_resource_generations[index] =
+                    Some(self.resource_generations[index]);
+                self.observation(None, ActionOutcome::ResourceHandleRemembered)
+            }
+            Action::DestroyResource { kind, handle } => {
+                let index = Self::resource_index(kind);
+                let generation = match handle {
+                    ResourceHandleRef::Current => self.resource_generations[index],
+                    ResourceHandleRef::Remembered => {
+                        let Some(generation) = self.remembered_resource_generations[index] else {
+                            return self.observation(
+                                None,
+                                ActionOutcome::Rejected(DriverError::InvalidHandle),
+                            );
+                        };
+                        generation
+                    }
+                };
+                if !self.resource_live[index] || self.resource_generations[index] != generation {
+                    return self
+                        .observation(None, ActionOutcome::Rejected(DriverError::InvalidHandle));
+                }
+                self.resource_live[index] = false;
+                self.observation(None, ActionOutcome::ResourceDestroyed)
+            }
         }
     }
 }
@@ -443,7 +500,7 @@ fn runtime_v1_executes_shared_conformance_scenarios() {
 
     let mut json = std::string::String::new();
     report.write_json(&mut json).unwrap();
-    assert!(json.contains("\"schema_version\":4"));
+    assert!(json.contains("\"schema_version\":5"));
     assert!(json.contains("\"execution_profile\":{\"revision\":1,\"modes\":14}"));
     assert!(json.contains("\"priority_then_fifo\""));
     assert!(json.contains("\"nested_scheduler_lock\""));
@@ -461,5 +518,7 @@ fn runtime_v1_executes_shared_conformance_scenarios() {
     assert!(json.contains("\"unbalanced_scheduler_unlock\""));
     assert!(json.contains("\"unbalanced_interrupt_exit\""));
     assert!(json.contains("\"blocking_in_scheduler_lock\""));
+    assert!(json.contains("\"duplicate_resource_destroy\""));
+    assert!(json.contains("\"stale_resource_handle\""));
     assert!(!json.contains("\"status\":\"failed\""));
 }
