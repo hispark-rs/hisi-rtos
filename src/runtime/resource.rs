@@ -155,3 +155,39 @@ mod tests {
         );
     }
 }
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    #[kani::proof]
+    fn stale_resource_generation_never_aliases_reused_slot() {
+        let generation: usize = kani::any();
+        kani::assume(generation > 0 && generation <= HANDLE_GENERATION_MAX);
+        let replacement_generation = next_generation(generation);
+        let old_handle = encode_handle(0, generation).unwrap();
+        let mut table = ResourceTable::<1>::new();
+        table.slots[0] = ResourceSlot {
+            pointer: 1,
+            generation: replacement_generation,
+            kind: ResourceKind::Semaphore,
+        };
+
+        assert_eq!(
+            table.resolve(old_handle, ResourceKind::Semaphore),
+            Err(DriverError::InvalidHandle)
+        );
+    }
+
+    #[kani::proof]
+    fn destroyed_resource_handle_cannot_be_resolved_twice() {
+        let pointer = NonZeroUsize::new(1).unwrap();
+        let mut table = ResourceTable::<1>::new();
+        let handle = table.insert(pointer, ResourceKind::Mutex).unwrap();
+        assert_eq!(table.remove(handle, ResourceKind::Mutex), Ok(pointer));
+        assert_eq!(
+            table.remove(handle, ResourceKind::Mutex),
+            Err(DriverError::InvalidHandle)
+        );
+    }
+}

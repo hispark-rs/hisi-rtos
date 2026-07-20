@@ -682,6 +682,104 @@ fn semaphore_waiters_are_priority_fifo_and_reorder_on_priority_change() {
 }
 
 #[test]
+fn cancelling_queued_semaphore_wait_makes_task_ready_without_minting_a_count() {
+    let semaphore = Semaphore::new(0);
+    let mut scheduler = Sched::new();
+    let waiter = IDLE_SLOT + 1;
+    scheduler.tasks[waiter].state = State::Blocked;
+    scheduler.tasks[waiter].waiting_sem = core::ptr::addr_of!(semaphore) as usize;
+    unsafe { enqueue_waiter(&mut scheduler, &mut *semaphore.inner.get(), waiter) };
+
+    assert_eq!(
+        cancel_wait_locked(&mut scheduler, waiter, 7),
+        WaitCancellationOutcome::Cancelled
+    );
+    let state = unsafe { &*semaphore.inner.get() };
+    assert_eq!(state.count, 0);
+    assert_eq!(state.wait_head, NIL);
+    assert_eq!(scheduler.tasks[waiter].waiting_sem, 0);
+    assert!(matches!(scheduler.tasks[waiter].state, State::Ready));
+    assert_eq!(scheduler.ready_pop(), waiter);
+}
+
+#[test]
+fn cancelling_semaphore_handoff_returns_exactly_one_count() {
+    let semaphore = Semaphore::new(0);
+    let mut scheduler = Sched::new();
+    let waiter = IDLE_SLOT + 1;
+    scheduler.tasks[waiter].state = State::Blocked;
+    scheduler.tasks[waiter].waiting_sem = core::ptr::addr_of!(semaphore) as usize;
+    unsafe { enqueue_waiter(&mut scheduler, &mut *semaphore.inner.get(), waiter) };
+    unsafe { release_semaphore_locked(&mut scheduler, &mut *semaphore.inner.get(), 3) };
+
+    assert_eq!(
+        cancel_wait_locked(&mut scheduler, waiter, 4),
+        WaitCancellationOutcome::Cancelled
+    );
+    let state = unsafe { &*semaphore.inner.get() };
+    assert_eq!(state.count, 1);
+    assert_eq!(scheduler.tasks[waiter].granted_sem, 0);
+    assert!(!scheduler.tasks[waiter].sem_granted);
+}
+
+#[test]
+fn cancelling_mutex_wait_restores_owner_priority() {
+    let mutex = RtosMutex::new();
+    let mut scheduler = Sched::new();
+    let owner = 0;
+    let waiter = IDLE_SLOT + 1;
+    scheduler.tasks[owner].state = State::Running;
+    scheduler.tasks[owner].base_priority = 20;
+    scheduler.tasks[owner].priority = 20;
+    scheduler.tasks[waiter].state = State::Blocked;
+    scheduler.tasks[waiter].priority = 2;
+    scheduler.tasks[waiter].waiting_mutex = core::ptr::addr_of!(mutex) as usize;
+    let state = unsafe { &mut *mutex.inner.get() };
+    state.owner = owner;
+    state.depth = 1;
+    enqueue_mutex_waiter(&mut scheduler, state, waiter);
+    scheduler.add_inheritance(owner, 2);
+
+    assert_eq!(
+        cancel_wait_locked(&mut scheduler, waiter, 9),
+        WaitCancellationOutcome::Cancelled
+    );
+    assert_eq!(state.wait_head, NIL);
+    assert_eq!(scheduler.tasks[owner].priority, 20);
+    assert!(matches!(scheduler.tasks[waiter].state, State::Ready));
+}
+
+#[test]
+fn cancelling_mutex_handoff_releases_unconsumed_ownership() {
+    let mutex = RtosMutex::new();
+    let mut scheduler = Sched::new();
+    let owner = 0;
+    let waiter = IDLE_SLOT + 1;
+    scheduler.tasks[owner].state = State::Running;
+    scheduler.tasks[owner].base_priority = 20;
+    scheduler.tasks[owner].priority = 20;
+    scheduler.tasks[waiter].state = State::Blocked;
+    scheduler.tasks[waiter].priority = 2;
+    scheduler.tasks[waiter].waiting_mutex = core::ptr::addr_of!(mutex) as usize;
+    let state = unsafe { &mut *mutex.inner.get() };
+    state.owner = owner;
+    state.depth = 1;
+    enqueue_mutex_waiter(&mut scheduler, state, waiter);
+    scheduler.add_inheritance(owner, 2);
+    release_mutex_locked(&mut scheduler, state, owner, 10);
+
+    assert_eq!(state.owner, waiter);
+    assert_eq!(
+        cancel_wait_locked(&mut scheduler, waiter, 11),
+        WaitCancellationOutcome::Cancelled
+    );
+    assert_eq!(state.owner, NIL);
+    assert_eq!(state.depth, 0);
+    assert_eq!(scheduler.tasks[waiter].granted_mutex, 0);
+    assert!(!scheduler.tasks[waiter].sem_granted);
+}
+
+#[test]
 fn duplicate_mutex_waiters_keep_owner_inherited_until_both_leave() {
     let mut scheduler = Sched::new();
     scheduler.tasks[0].state = State::Running;

@@ -110,6 +110,7 @@ impl Semaphore {
             critical_section::with(|cs| {
                 let s = &mut *SCHED.borrow_ref_mut(cs);
                 s.tasks[s.current].sem_granted = false;
+                s.tasks[s.current].granted_sem = 0;
             });
         }
         Ok(())
@@ -164,6 +165,7 @@ impl Semaphore {
                     let s = &mut *SCHED.borrow_ref_mut(cs);
                     let granted = s.tasks[s.current].sem_granted;
                     s.tasks[s.current].sem_granted = false;
+                    s.tasks[s.current].granted_sem = 0;
                     granted
                 }))
             }
@@ -212,6 +214,7 @@ pub(super) fn release_semaphore_locked(sched: &mut Sched, state: &mut SemState, 
     }
     sched.tasks[waiter].next = NIL;
     sched.tasks[waiter].wake_at = 0;
+    sched.tasks[waiter].granted_sem = sched.tasks[waiter].waiting_sem;
     sched.tasks[waiter].waiting_sem = 0;
     sched.tasks[waiter].sem_granted = true;
     sched.make_ready(waiter, now);
@@ -296,6 +299,7 @@ impl RtosMutex {
                     let s = &mut *SCHED.borrow_ref_mut(cs);
                     let granted = s.tasks[s.current].sem_granted;
                     s.tasks[s.current].sem_granted = false;
+                    s.tasks[s.current].granted_mutex = 0;
                     granted
                 }))
             }
@@ -362,6 +366,7 @@ pub(super) fn release_mutex_locked(
 
     state.owner = next;
     state.depth = 1;
+    sched.tasks[next].granted_mutex = sched.tasks[next].waiting_mutex;
     sched.tasks[next].waiting_mutex = 0;
     sched.tasks[next].wake_at = 0;
     sched.tasks[next].sem_granted = true;
@@ -373,6 +378,71 @@ pub(super) fn release_mutex_locked(
         sched.add_inheritance(next, sched.tasks[waiter].priority);
         waiter = sched.tasks[waiter].next;
     }
+}
+
+pub(super) fn cancel_wait_locked(
+    sched: &mut Sched,
+    task: usize,
+    now: u64,
+) -> WaitCancellationOutcome {
+    let waiting_sem = sched.tasks[task].waiting_sem;
+    if waiting_sem != 0 {
+        // SAFETY: a queued waiter keeps the semaphore allocation live and this
+        // function is called with exclusive scheduler/queue access.
+        let state = unsafe { &mut *(*(waiting_sem as *const Semaphore)).inner.get() };
+        remove_waiter(sched, state, task);
+        sched.tasks[task].waiting_sem = 0;
+        sched.tasks[task].wake_at = 0;
+        sched.tasks[task].sem_granted = false;
+        if sched.tasks[task].state == State::Blocked {
+            sched.make_ready(task, now);
+        }
+        return WaitCancellationOutcome::Cancelled;
+    }
+
+    let waiting_mutex = sched.tasks[task].waiting_mutex;
+    if waiting_mutex != 0 {
+        // SAFETY: a queued waiter keeps the mutex allocation live and queue
+        // mutation is serialized by the scheduler critical section.
+        let state = unsafe { &mut *(*(waiting_mutex as *const RtosMutex)).inner.get() };
+        remove_mutex_waiter(sched, state, task);
+        if state.owner != NIL {
+            sched.remove_inheritance(state.owner, sched.tasks[task].priority);
+        }
+        sched.tasks[task].waiting_mutex = 0;
+        sched.tasks[task].wake_at = 0;
+        sched.tasks[task].sem_granted = false;
+        if sched.tasks[task].state == State::Blocked {
+            sched.make_ready(task, now);
+        }
+        return WaitCancellationOutcome::Cancelled;
+    }
+
+    let granted_sem = sched.tasks[task].granted_sem;
+    if granted_sem != 0 {
+        sched.tasks[task].granted_sem = 0;
+        sched.tasks[task].sem_granted = false;
+        // SAFETY: an unconsumed direct grant keeps the resource allocation live.
+        let state = unsafe { &mut *(*(granted_sem as *const Semaphore)).inner.get() };
+        release_semaphore_locked(sched, state, now);
+        return WaitCancellationOutcome::Cancelled;
+    }
+
+    let granted_mutex = sched.tasks[task].granted_mutex;
+    if granted_mutex != 0 {
+        sched.tasks[task].granted_mutex = 0;
+        sched.tasks[task].sem_granted = false;
+        // SAFETY: an unconsumed handoff keeps the mutex live; direct handoff
+        // makes `task` its depth-one owner until the waiter consumes the grant.
+        let state = unsafe { &mut *(*(granted_mutex as *const RtosMutex)).inner.get() };
+        debug_assert_eq!(state.owner, task);
+        debug_assert_eq!(state.depth, 1);
+        state.depth = 0;
+        release_mutex_locked(sched, state, task, now);
+        return WaitCancellationOutcome::Cancelled;
+    }
+
+    WaitCancellationOutcome::NotWaiting
 }
 
 pub(super) fn enqueue_mutex_waiter(sched: &mut Sched, state: &mut MutexState, task: usize) {

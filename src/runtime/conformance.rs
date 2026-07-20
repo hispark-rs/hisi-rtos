@@ -485,8 +485,42 @@ impl Backend for DeterministicBackend {
                     return self
                         .observation(None, ActionOutcome::Rejected(DriverError::InvalidHandle));
                 }
+                let busy = match kind {
+                    ResourceKind::Semaphore => {
+                        // SAFETY: the deterministic backend is single-threaded.
+                        let state = unsafe { &*self.semaphore.inner.get() };
+                        super::driver::semaphore_state_has_waiters(state)
+                            || self.scheduler.tasks.iter().any(|task| {
+                                task.granted_sem == (&self.semaphore as *const Semaphore as usize)
+                            })
+                    }
+                    ResourceKind::Mutex => {
+                        // SAFETY: the deterministic backend is single-threaded.
+                        let state = unsafe { &*self.mutex.inner.get() };
+                        super::driver::mutex_state_is_busy(state)
+                    }
+                };
+                if busy {
+                    return self
+                        .observation(None, ActionOutcome::Rejected(DriverError::InvalidContext));
+                }
                 self.resource_live[index] = false;
                 self.observation(None, ActionOutcome::ResourceDestroyed)
+            }
+            Action::CancelWait { actor } => {
+                let slot = Self::slot(actor)?;
+                if self.scheduler.tasks[slot].state == State::Free {
+                    return self
+                        .observation(None, ActionOutcome::Rejected(DriverError::InvalidHandle));
+                }
+                let outcome = cancel_wait_locked(&mut self.scheduler, slot, self.now);
+                self.observation(
+                    Some(actor),
+                    match outcome {
+                        WaitCancellationOutcome::Cancelled => ActionOutcome::WaitCancelled,
+                        WaitCancellationOutcome::NotWaiting => ActionOutcome::NoPendingWait,
+                    },
+                )
             }
         }
     }
@@ -500,7 +534,7 @@ fn runtime_v1_executes_shared_conformance_scenarios() {
 
     let mut json = std::string::String::new();
     report.write_json(&mut json).unwrap();
-    assert!(json.contains("\"schema_version\":5"));
+    assert!(json.contains("\"schema_version\":6"));
     assert!(json.contains("\"execution_profile\":{\"revision\":1,\"modes\":14}"));
     assert!(json.contains("\"priority_then_fifo\""));
     assert!(json.contains("\"nested_scheduler_lock\""));
@@ -520,5 +554,9 @@ fn runtime_v1_executes_shared_conformance_scenarios() {
     assert!(json.contains("\"blocking_in_scheduler_lock\""));
     assert!(json.contains("\"duplicate_resource_destroy\""));
     assert!(json.contains("\"stale_resource_handle\""));
+    assert!(json.contains("\"semaphore_busy_destroy\""));
+    assert!(json.contains("\"mutex_busy_destroy\""));
+    assert!(json.contains("\"semaphore_cancel_after_grant\""));
+    assert!(json.contains("\"mutex_cancel_after_grant\""));
     assert!(!json.contains("\"status\":\"failed\""));
 }

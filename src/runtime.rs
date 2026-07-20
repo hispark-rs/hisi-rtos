@@ -39,8 +39,8 @@ mod scheduler;
 use scheduler::{Sched, State, TaskFn, Tcb};
 mod sync;
 use sync::{
-    MutexState, RtosMutex, SemState, Semaphore, enqueue_mutex_waiter, enqueue_waiter,
-    remove_mutex_waiter, remove_waiter,
+    MutexState, RtosMutex, SemState, Semaphore, cancel_wait_locked, enqueue_mutex_waiter,
+    enqueue_waiter, remove_mutex_waiter, remove_waiter,
 };
 #[cfg(test)]
 use sync::{release_mutex_locked, release_semaphore_locked};
@@ -65,7 +65,7 @@ use embassy_time_driver::Driver as EmbassyTimeDriver;
 use embassy_time_queue_utils::Queue as EmbassyTimeQueue;
 use hisi_rf_rtos_driver::{
     Error as DriverError, MutexHandle, Runtime, RuntimeContract, RuntimeExecutionProfile,
-    SemaphoreHandle, TaskConfig, TaskPriority, WaitOutcome, WaitTimeout,
+    SemaphoreHandle, TaskConfig, TaskPriority, WaitCancellationOutcome, WaitOutcome, WaitTimeout,
 };
 
 /// Contract-v1 priority levels: 0 is highest, 31 is lowest.

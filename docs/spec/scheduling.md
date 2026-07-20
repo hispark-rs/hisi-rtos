@@ -113,14 +113,24 @@ are non-zero and `capacity <= replenishment_period`.
 ## Waits And Priority Inheritance
 
 - **RTOS-WAIT-001:** Signal, timeout, interrupt wake, and cancellation compete at
-  one scheduler-serialized linearization point; one wake reason wins.
+  one scheduler-serialized linearization point; one wake reason wins. Cancellation
+  accepts a generation-bearing `TaskId` and applies to queued waits as well as a
+  direct handoff that the selected task has not consumed yet.
 - **RTOS-WAIT-002:** A semaphore grant is direct and cannot be stolen by a third
   task before the selected waiter runs. The selected waiter has the highest
   effective priority; waiters at the same priority remain FIFO.
 - **RTOS-WAIT-003:** Destroying a semaphore with waiters, or a mutex with an owner
   or waiters, fails closed with `InvalidContext`. The contract remains unsafe:
-  callers must still exclude concurrent and future use. Contract v1 does not
-  promise detection of a stale or duplicate opaque resource handle.
+  callers must still exclude concurrent and future use. Contract v1.1 resource
+  handles encode a slot generation and resource kind; stale, duplicate, and
+  wrong-kind handles fail with `InvalidHandle` before pointer dereference. A
+  semaphore with an unconsumed direct grant is also busy.
+- **RTOS-WAIT-004:** Cancelling a queued wait makes that task Ready and removes it
+  from exactly one wait queue. Cancelling an unconsumed semaphore handoff returns
+  exactly one count; cancelling an unconsumed mutex handoff releases that
+  depth-one ownership and transfers it to the next eligible waiter. Cancellation
+  after the task consumed the handoff reports `NotWaiting` and cannot revoke the
+  acquired resource.
 - **RTOS-MUTEX-001:** Recursive mutex unlock is owner-only. Final unlock directly
   hands ownership to the highest-priority FIFO waiter.
 - **RTOS-MUTEX-002:** Effective priority is the minimum numeric value of base

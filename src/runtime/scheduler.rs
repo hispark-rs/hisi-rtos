@@ -97,6 +97,8 @@ pub(super) struct Tcb {
     pub(super) waiting_sem: usize,
     pub(super) waiting_mutex: usize,
     pub(super) sem_granted: bool,
+    pub(super) granted_sem: usize,
+    pub(super) granted_mutex: usize,
     pub(super) base_priority: u8,
     pub(super) priority: u8,
     pub(super) inherited_waiters: [u8; PRIORITY_LEVELS],
@@ -122,6 +124,8 @@ impl Tcb {
             waiting_sem: 0,
             waiting_mutex: 0,
             sem_granted: false,
+            granted_sem: 0,
+            granted_mutex: 0,
             base_priority: (PRIORITY_LEVELS - 1) as u8,
             priority: (PRIORITY_LEVELS - 1) as u8,
             inherited_waiters: [0; PRIORITY_LEVELS],
@@ -666,6 +670,7 @@ impl Sched {
                 remove_waiter(self, sem_state, i);
                 self.tasks[i].waiting_sem = 0;
                 self.tasks[i].sem_granted = false;
+                self.tasks[i].granted_sem = 0;
                 self.tasks[i].wake_at = 0;
                 self.make_ready(i, now);
                 self.diagnostics.semaphore_timeouts =
@@ -685,6 +690,7 @@ impl Sched {
                 }
                 self.tasks[i].waiting_mutex = 0;
                 self.tasks[i].sem_granted = false;
+                self.tasks[i].granted_mutex = 0;
                 self.tasks[i].wake_at = 0;
                 self.make_ready(i, now);
             }

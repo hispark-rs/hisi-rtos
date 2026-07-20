@@ -152,8 +152,8 @@ host_tests = ["tests::task_metrics_account_dispatch_cpu_and_ready_latency", "tes
 
 [[requirement]]
 id = "RTOS-WAIT-001"
-implementation = ["src/runtime/scheduler.rs:Sched::wake_sleepers", "src/runtime/sync.rs:Semaphore::down_timeout"]
-host_tests = ["tests::timed_semaphore_wait_wakes_only_after_its_deadline", "tests::forever_semaphore_wait_is_not_treated_as_an_expired_deadline"]
+implementation = ["src/runtime/scheduler.rs:Sched::wake_sleepers", "src/runtime/sync.rs:Semaphore::down_timeout", "src/runtime/sync.rs:cancel_wait_locked"]
+host_tests = ["tests::timed_semaphore_wait_wakes_only_after_its_deadline", "tests::forever_semaphore_wait_is_not_treated_as_an_expired_deadline", "tests::cancelling_queued_semaphore_wait_makes_task_ready_without_minting_a_count", "tests::cancelling_mutex_wait_restores_owner_priority"]
 hil = ["A3_SCHEDULER_STRESS_OK"]
 
 [[requirement]]
@@ -163,8 +163,16 @@ host_tests = ["tests::timed_semaphore_wait_wakes_only_after_its_deadline"]
 
 [[requirement]]
 id = "RTOS-WAIT-003"
-implementation = ["src/runtime/driver.rs:semaphore_state_has_waiters", "src/runtime/driver.rs:mutex_state_is_busy"]
-host_tests = ["tests::semaphore_with_waiters_cannot_be_destroyed", "tests::owned_or_waited_mutex_cannot_be_destroyed"]
+implementation = ["src/runtime/resource.rs:ResourceTable", "src/runtime/driver.rs:semaphore_state_has_waiters", "src/runtime/driver.rs:mutex_state_is_busy"]
+host_tests = ["runtime::resource::tests::duplicate_and_stale_handles_fail_before_pointer_resolution", "runtime::resource::tests::handle_kind_is_part_of_the_identity", "tests::semaphore_with_waiters_cannot_be_destroyed", "tests::owned_or_waited_mutex_cannot_be_destroyed"]
+kani = "runtime::resource::proofs::stale_resource_generation_never_aliases_reused_slot; runtime::resource::proofs::destroyed_resource_handle_cannot_be_resolved_twice"
+tla = "spec/ResourceLifecycle.tla:StaleDestroyPreservesLiveResource; spec/ResourceLifecycle.tla:DuplicateDestroyPreservesDeadResource"
+
+[[requirement]]
+id = "RTOS-WAIT-004"
+implementation = ["src/runtime/sync.rs:cancel_wait_locked", "src/runtime/driver.rs:HisiRuntime::cancel_wait"]
+host_tests = ["tests::cancelling_queued_semaphore_wait_makes_task_ready_without_minting_a_count", "tests::cancelling_semaphore_handoff_returns_exactly_one_count", "tests::cancelling_mutex_wait_restores_owner_priority", "tests::cancelling_mutex_handoff_releases_unconsumed_ownership"]
+tla = "spec/ResourceLifecycle.tla:NoGrantWithoutLiveResource; spec/ResourceLifecycle.tla:GrantIsNeverDuplicated"
 
 [[requirement]]
 id = "RTOS-MUTEX-001"

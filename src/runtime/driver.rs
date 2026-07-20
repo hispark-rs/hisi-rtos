@@ -91,6 +91,43 @@ impl Runtime for HisiRuntime {
         })
     }
 
+    fn cancel_wait(&self, task: TaskId) -> Result<WaitCancellationOutcome, DriverError> {
+        let (slot, generation) = decode_task_id(task)?;
+        let machine_interrupts_enabled = machine_interrupts_enabled();
+        let now = now_ms();
+        let mut defer_reschedule = false;
+        let (outcome, preemption) = critical_section::with(|cs| {
+            if INTERRUPT_DEPTH.borrow(cs).get() != 0 {
+                return Err(DriverError::InvalidContext);
+            }
+            let scheduler = &mut *SCHED.borrow_ref_mut(cs);
+            let Some(tcb) = scheduler.tasks.get(slot) else {
+                return Err(DriverError::InvalidHandle);
+            };
+            if tcb.state == State::Free || tcb.identity_generation != generation {
+                return Err(DriverError::InvalidHandle);
+            }
+            let outcome = cancel_wait_locked(scheduler, slot, now);
+            let preemption =
+                if outcome == WaitCancellationOutcome::Cancelled && machine_interrupts_enabled {
+                    scheduler.take_preemption_target(now)
+                } else {
+                    defer_reschedule = outcome == WaitCancellationOutcome::Cancelled
+                        && !machine_interrupts_enabled;
+                    None
+                };
+            Ok((outcome, preemption))
+        })?;
+        if let Some((current, next)) = preemption {
+            switch_to(current, next);
+        }
+        if defer_reschedule {
+            request_reschedule();
+        }
+        rearm_timer();
+        Ok(outcome)
+    }
+
     fn lock_scheduler(&self) -> Result<(), DriverError> {
         ensure_switch_delivery()?;
         let now = now_ms();
@@ -179,7 +216,12 @@ impl Runtime for HisiRuntime {
             // serialized by this scheduler critical section.
             let state = unsafe { &*(pointer.get() as *const Semaphore) }.inner.get();
             // SAFETY: the critical section provides exclusive state access.
-            if semaphore_state_has_waiters(unsafe { &*state }) {
+            let scheduler = &*SCHED.borrow_ref(cs);
+            let pending_grant = scheduler
+                .tasks
+                .iter()
+                .any(|task| task.granted_sem == pointer.get());
+            if semaphore_state_has_waiters(unsafe { &*state }) || pending_grant {
                 return Err(DriverError::InvalidContext);
             }
             handles.remove(semaphore.into_raw(), ResourceKind::Semaphore)
