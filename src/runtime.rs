@@ -37,6 +37,8 @@ use crate::{RunPolicy, TaskId};
 
 mod scheduler;
 use scheduler::{Sched, State, TaskFn, Tcb};
+mod reservation;
+use reservation::ReservationTable;
 mod sync;
 use sync::{
     MutexState, RtosMutex, SemState, Semaphore, cancel_wait_locked, enqueue_mutex_waiter,
@@ -65,8 +67,8 @@ use embassy_time_driver::Driver as EmbassyTimeDriver;
 use embassy_time_queue_utils::Queue as EmbassyTimeQueue;
 use hisi_rf_rtos_driver::{
     Error as DriverError, MutexHandle, Runtime, RuntimeContract, RuntimeExecutionProfile,
-    SemaphoreHandle, TaskCapacity, TaskConfig, TaskPriority, WaitCancellationOutcome, WaitOutcome,
-    WaitTimeout,
+    SemaphoreHandle, TaskAdmissionError, TaskCapacity, TaskConfig, TaskPriority, TaskReservation,
+    WaitCancellationOutcome, WaitOutcome, WaitTimeout,
 };
 
 /// Contract-v1 priority levels: 0 is highest, 31 is lowest.
@@ -337,6 +339,7 @@ fn spawn(
     stack_size: usize,
     priority: u8,
     run_policy: RunPolicy,
+    reservation: Option<&TaskReservation>,
 ) -> Result<usize, DriverError> {
     init();
     reclaim_retired_stacks();
@@ -364,7 +367,10 @@ fn spawn(
     let now = now_ms();
     let slot = critical_section::with(|cs| -> Result<usize, DriverError> {
         let s = &mut *SCHED.borrow_ref_mut(cs);
-        let i = s.alloc_dynamic_slot()?;
+        let i = match reservation {
+            Some(reservation) => s.alloc_reserved_dynamic_slot(reservation)?,
+            None => s.alloc_dynamic_slot()?,
+        };
         s.slot_generations[i] = s.slot_generations[i].wrapping_add(1).max(1);
         let identity_generation = s.slot_generations[i];
         let t = &mut s.tasks[i];

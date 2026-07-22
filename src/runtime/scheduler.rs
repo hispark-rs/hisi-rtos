@@ -155,6 +155,7 @@ pub(super) struct Sched {
     pub(super) retired_stacks: [usize; TASK_SLOT_COUNT],
     pub(super) retired_count: usize,
     pub(super) slot_generations: [u16; TASK_SLOT_COUNT],
+    pub(super) reservations: ReservationTable,
     pub(super) time_slice_pending: bool,
     pub(super) time_slice_deadline: u64,
     pub(super) forced_next: usize,
@@ -174,6 +175,7 @@ impl Sched {
             retired_stacks: [0; TASK_SLOT_COUNT],
             retired_count: 0,
             slot_generations: [0; TASK_SLOT_COUNT],
+            reservations: ReservationTable::new(),
             time_slice_pending: false,
             time_slice_deadline: 0,
             forced_next: NIL,
@@ -205,9 +207,11 @@ impl Sched {
             .iter()
             .filter(|task| task.state != State::Free)
             .count() as u8;
+        snapshot.dynamic_reserved = self.reservations.total_remaining() as u8;
         snapshot.dynamic_free = snapshot
             .dynamic_capacity
-            .saturating_sub(snapshot.dynamic_used);
+            .saturating_sub(snapshot.dynamic_used)
+            .saturating_sub(snapshot.dynamic_reserved);
         snapshot
     }
 
@@ -770,9 +774,47 @@ impl Sched {
         self.time_slice_deadline = 0;
     }
     pub(super) fn alloc_dynamic_slot(&mut self) -> Result<usize, DriverError> {
+        let free = self.tasks[(IDLE_SLOT + 1)..]
+            .iter()
+            .filter(|task| task.state == State::Free)
+            .count();
+        if free <= self.reservations.total_remaining() {
+            return Err(DriverError::NoTaskSlots);
+        }
         ((IDLE_SLOT + 1)..TASK_SLOT_COUNT)
             .find(|&i| self.tasks[i].state == State::Free)
             .ok_or(DriverError::NoTaskSlots)
+    }
+
+    pub(super) fn reserve_dynamic_slots(
+        &mut self,
+        required: NonZeroUsize,
+    ) -> Result<TaskReservation, TaskAdmissionError> {
+        let available = self.tasks[(IDLE_SLOT + 1)..]
+            .iter()
+            .filter(|task| task.state == State::Free)
+            .count()
+            .saturating_sub(self.reservations.total_remaining());
+        self.reservations.reserve(required, available)
+    }
+
+    pub(super) fn release_task_reservation(
+        &mut self,
+        reservation: &TaskReservation,
+    ) -> Result<(), DriverError> {
+        self.reservations.release(reservation)
+    }
+
+    pub(super) fn alloc_reserved_dynamic_slot(
+        &mut self,
+        reservation: &TaskReservation,
+    ) -> Result<usize, DriverError> {
+        self.reservations.ensure_consumable(reservation)?;
+        let slot = ((IDLE_SLOT + 1)..TASK_SLOT_COUNT)
+            .find(|&i| self.tasks[i].state == State::Free)
+            .ok_or(DriverError::NoTaskSlots)?;
+        self.reservations.consume(reservation)?;
+        Ok(slot)
     }
 
     pub(super) fn set_run_policy(&mut self, slot: usize, policy: RunPolicy, now: u64) {

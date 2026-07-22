@@ -140,7 +140,9 @@ pub struct Diagnostics {
     pub dynamic_capacity: u8,
     /// Dynamic slots currently occupied by live tasks.
     pub dynamic_used: u8,
-    /// Dynamic slots currently available for task creation.
+    /// Dynamic slots promised to live reservations but not yet consumed.
+    pub dynamic_reserved: u8,
+    /// Unreserved dynamic slots currently available for ordinary task creation.
     pub dynamic_free: u8,
     pub current_lock_depth: u16,
 }
@@ -229,6 +231,7 @@ impl Diagnostics {
         internal_tasks: (ADOPTED_MAIN_TASKS + INTERNAL_IDLE_TASKS) as u8,
         dynamic_capacity: DYNAMIC_TASK_CAPACITY as u8,
         dynamic_used: 0,
+        dynamic_reserved: 0,
         dynamic_free: DYNAMIC_TASK_CAPACITY as u8,
         current_lock_depth: 0,
     };

@@ -29,7 +29,7 @@ pub(super) fn mutex_state_is_busy(state: &MutexState) -> bool {
 
 impl Runtime for HisiRuntime {
     fn contract(&self) -> RuntimeContract {
-        RuntimeContract::V1_2
+        RuntimeContract::V1_3
     }
 
     fn execution_profile(&self) -> RuntimeExecutionProfile {
@@ -42,11 +42,24 @@ impl Runtime for HisiRuntime {
 
     fn task_capacity(&self) -> Result<TaskCapacity, DriverError> {
         let diagnostics = critical_section::with(|cs| SCHED.borrow_ref(cs).diagnostics());
-        TaskCapacity::new(
+        TaskCapacity::new_with_reserved(
             usize::from(diagnostics.dynamic_capacity),
             usize::from(diagnostics.dynamic_used),
+            usize::from(diagnostics.dynamic_reserved),
         )
         .ok_or(DriverError::Runtime)
+    }
+
+    fn reserve_tasks(&self, required: NonZeroUsize) -> Result<TaskReservation, TaskAdmissionError> {
+        critical_section::with(|cs| SCHED.borrow_ref_mut(cs).reserve_dynamic_slots(required))
+    }
+
+    fn release_task_reservation(&self, reservation: &TaskReservation) -> Result<(), DriverError> {
+        critical_section::with(|cs| {
+            SCHED
+                .borrow_ref_mut(cs)
+                .release_task_reservation(reservation)
+        })
     }
 
     fn spawn(
@@ -62,6 +75,28 @@ impl Runtime for HisiRuntime {
             config.stack_size.get(),
             priority,
             start_state().config.radio_task_policy,
+            None,
+        )?;
+        let generation =
+            critical_section::with(|cs| SCHED.borrow_ref(cs).tasks[slot].identity_generation);
+        encode_task_id(slot, generation)
+    }
+
+    fn spawn_reserved(
+        &self,
+        reservation: &TaskReservation,
+        entry: hisi_rf_rtos_driver::TaskEntry,
+        arg: *mut c_void,
+        config: TaskConfig,
+    ) -> Result<TaskId, DriverError> {
+        let priority = config.priority.into_raw();
+        let slot = spawn(
+            entry,
+            arg,
+            config.stack_size.get(),
+            priority,
+            start_state().config.radio_task_policy,
+            Some(reservation),
         )?;
         let generation =
             critical_section::with(|cs| SCHED.borrow_ref(cs).tasks[slot].identity_generation);

@@ -28,7 +28,77 @@ fn dynamic_allocation_reserves_main_and_idle_slots() {
     assert_eq!(diagnostics.internal_tasks, 2);
     assert_eq!(diagnostics.dynamic_capacity, 15);
     assert_eq!(diagnostics.dynamic_used, 15);
+    assert_eq!(diagnostics.dynamic_reserved, 0);
     assert_eq!(diagnostics.dynamic_free, 0);
+}
+
+#[test]
+fn reservations_protect_promised_slots_from_ordinary_spawns() {
+    let mut scheduler = Sched::new();
+    let reservation = scheduler
+        .reserve_dynamic_slots(NonZeroUsize::new(2).unwrap())
+        .unwrap();
+
+    let diagnostics = scheduler.diagnostics();
+    assert_eq!(diagnostics.dynamic_used, 0);
+    assert_eq!(diagnostics.dynamic_reserved, 2);
+    assert_eq!(diagnostics.dynamic_free, 13);
+
+    for _ in 0..13 {
+        let slot = scheduler.alloc_dynamic_slot().unwrap();
+        scheduler.tasks[slot].state = State::Ready;
+    }
+    assert_eq!(
+        scheduler.alloc_dynamic_slot(),
+        Err(DriverError::NoTaskSlots)
+    );
+
+    for expected_remaining in [1, 0] {
+        let slot = scheduler.alloc_reserved_dynamic_slot(&reservation).unwrap();
+        scheduler.tasks[slot].state = State::Ready;
+        assert_eq!(scheduler.diagnostics().dynamic_reserved, expected_remaining);
+    }
+    assert_eq!(
+        scheduler.alloc_reserved_dynamic_slot(&reservation),
+        Err(DriverError::NoTaskSlots)
+    );
+    scheduler.release_task_reservation(&reservation).unwrap();
+    assert_eq!(
+        scheduler.release_task_reservation(&reservation),
+        Err(DriverError::InvalidHandle)
+    );
+}
+
+#[test]
+fn releasing_a_reservation_returns_only_unconsumed_slots() {
+    let mut scheduler = Sched::new();
+    let old = scheduler
+        .reserve_dynamic_slots(NonZeroUsize::new(3).unwrap())
+        .unwrap();
+    let slot = scheduler.alloc_reserved_dynamic_slot(&old).unwrap();
+    scheduler.tasks[slot].state = State::Ready;
+    scheduler.release_task_reservation(&old).unwrap();
+
+    let diagnostics = scheduler.diagnostics();
+    assert_eq!(diagnostics.dynamic_used, 1);
+    assert_eq!(diagnostics.dynamic_reserved, 0);
+    assert_eq!(diagnostics.dynamic_free, 14);
+    assert_eq!(
+        scheduler.alloc_reserved_dynamic_slot(&old),
+        Err(DriverError::InvalidHandle)
+    );
+
+    let replacement = scheduler
+        .reserve_dynamic_slots(NonZeroUsize::new(14).unwrap())
+        .unwrap();
+    assert_ne!(old.into_raw(), replacement.into_raw());
+    assert_eq!(
+        scheduler.reserve_dynamic_slots(NonZeroUsize::new(1).unwrap()),
+        Err(TaskAdmissionError::InsufficientTaskSlots {
+            required: 1,
+            available: 0,
+        })
+    );
 }
 
 #[test]
