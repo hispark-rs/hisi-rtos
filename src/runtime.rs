@@ -65,7 +65,8 @@ use embassy_time_driver::Driver as EmbassyTimeDriver;
 use embassy_time_queue_utils::Queue as EmbassyTimeQueue;
 use hisi_rf_rtos_driver::{
     Error as DriverError, MutexHandle, Runtime, RuntimeContract, RuntimeExecutionProfile,
-    SemaphoreHandle, TaskConfig, TaskPriority, WaitCancellationOutcome, WaitOutcome, WaitTimeout,
+    SemaphoreHandle, TaskCapacity, TaskConfig, TaskPriority, WaitCancellationOutcome, WaitOutcome,
+    WaitTimeout,
 };
 
 /// Contract-v1 priority levels: 0 is highest, 31 is lowest.

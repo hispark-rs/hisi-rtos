@@ -29,7 +29,7 @@ pub(super) fn mutex_state_is_busy(state: &MutexState) -> bool {
 
 impl Runtime for HisiRuntime {
     fn contract(&self) -> RuntimeContract {
-        RuntimeContract::V1
+        RuntimeContract::V1_2
     }
 
     fn execution_profile(&self) -> RuntimeExecutionProfile {
@@ -38,6 +38,15 @@ impl Runtime for HisiRuntime {
         } else {
             RuntimeExecutionProfile::V1_PORTLESS_COOPERATIVE
         }
+    }
+
+    fn task_capacity(&self) -> Result<TaskCapacity, DriverError> {
+        let diagnostics = critical_section::with(|cs| SCHED.borrow_ref(cs).diagnostics());
+        TaskCapacity::new(
+            usize::from(diagnostics.dynamic_capacity),
+            usize::from(diagnostics.dynamic_used),
+        )
+        .ok_or(DriverError::Runtime)
     }
 
     fn spawn(

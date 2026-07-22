@@ -87,16 +87,16 @@ dependencies = [
 
 [[package]]
 name = "hisi-rf-rtos-driver"
-version = "0.1.0-alpha.14"
+version = "0.1.0-alpha.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa71fe7da1ec43f5e5476d3d3a9bda762d6867f450994948507565d6eae992b1"
+checksum = "da9034728f6abd4fb50b0535ae46a6487afc74734c0a1e40ed79d1d25f57f8e2"
 dependencies = [
  "critical-section",
 ]
 
 [[package]]
 name = "hisi-rtos"
-version = "0.1.0-alpha.8"
+version = "0.1.0-alpha.9"
 dependencies = [
  "critical-section",
  "embassy-time-driver",

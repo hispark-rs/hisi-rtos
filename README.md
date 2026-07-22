@@ -40,6 +40,10 @@ Vendor LiteOS is a behavior and disassembly oracle for the WS63 blob ABI, not a
 backend or dependency of this crate. `hisi-rtos` is the sole maintained native
 runtime; the WS63 compatibility adapter maps only the symbols actually required
 by a versioned radio archive onto `hisi-rf-rtos-driver` capabilities.
+Contract v1.2 reports the scheduler's 15-slot dynamic capacity as an advisory
+preflight. The adopted main and internal idle tasks do not consume that quota.
+This snapshot detects deterministic under-provisioning but does not claim an
+owner-bound reservation.
 
 The normative scheduler contract and machine-readable evidence map live in
 [`docs/spec/scheduling.md`](docs/spec/scheduling.md) and
