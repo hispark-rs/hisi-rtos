@@ -16,7 +16,13 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: rustup component add rust-src
       - run: cargo fmt --all -- --check
-      - run: uv run --script scripts/check-requirements.py
+      - name: Validate and inventory requirement evidence
+        run: uv run --script scripts/check-requirements.py --report target/evidence/requirements.json
+      - name: Upload requirement evidence inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: requirement-evidence
+          path: target/evidence/requirements.json
       - run: cargo test --locked --target x86_64-unknown-linux-gnu
       - run: cargo clippy -Zbuild-std=core --target riscv32imfc-unknown-none-elf -- -D warnings
       - run: cargo build -Zbuild-std=core --target riscv32imfc-unknown-none-elf
@@ -94,19 +100,38 @@ jobs:
             | sha256sum --check
       - name: Check scheduler budget model
         working-directory: spec
-        run: java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config SchedulerBudget.cfg SchedulerBudget.tla
+        run: |
+          mkdir -p ../target/evidence/tla
+          java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config SchedulerBudget.cfg SchedulerBudget.tla \
+            | tee ../target/evidence/tla/SchedulerBudget.log
       - name: Check resource lifecycle model
         working-directory: spec
-        run: java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config ResourceLifecycle.cfg ResourceLifecycle.tla
+        run: |
+          java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config ResourceLifecycle.cfg ResourceLifecycle.tla \
+            | tee ../target/evidence/tla/ResourceLifecycle.log
       - name: Check wait linearization model
         working-directory: spec
-        run: java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config WaitLinearization.cfg WaitLinearization.tla
+        run: |
+          java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config WaitLinearization.cfg WaitLinearization.tla \
+            | tee ../target/evidence/tla/WaitLinearization.log
       - name: Check priority inheritance model
         working-directory: spec
-        run: java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config PriorityInheritance.cfg PriorityInheritance.tla
+        run: |
+          java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config PriorityInheritance.cfg PriorityInheritance.tla \
+            | tee ../target/evidence/tla/PriorityInheritance.log
       - name: Check timer re-arm model
         working-directory: spec
-        run: java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config TimerRearm.cfg TimerRearm.tla
+        run: |
+          java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config TimerRearm.cfg TimerRearm.tla \
+            | tee ../target/evidence/tla/TimerRearm.log
       - name: Check switch-intent model
         working-directory: spec
-        run: java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config SwitchIntent.cfg SwitchIntent.tla
+        run: |
+          java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config SwitchIntent.cfg SwitchIntent.tla \
+            | tee ../target/evidence/tla/SwitchIntent.log
+      - name: Upload TLA+ state-space evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tla-state-space-evidence
+          path: target/evidence/tla

@@ -51,4 +51,7 @@ The normative scheduler contract and machine-readable evidence map live in
 [`docs/spec/requirements.toml`](docs/spec/requirements.toml). Executable TLA+
 models under `spec/` cover periodic CPU quota, resource/wait lifecycle, wait
 linearization, bounded priority inheritance, timer re-arm generation, and
-switch-intent ownership.
+switch-intent ownership. CI validates every implementation, host-test, TLA+,
+Kani, and HIL-marker reference, then publishes a JSON requirement inventory and
+the complete TLA+ state-space logs as build artifacts. A requirement carrying a
+HIL marker remains `hil-required`; software evidence never silently graduates it.
