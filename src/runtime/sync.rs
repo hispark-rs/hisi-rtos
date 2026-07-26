@@ -190,13 +190,14 @@ impl Semaphore {
             let interrupt_depth = INTERRUPT_DEPTH.borrow(cs).get();
             if interrupt_depth == 0 && machine_interrupts_enabled {
                 s.take_preemption_target(now)
+                    .map(|(current, next)| s.prepare_switch_intent(current, next))
             } else {
                 defer_reschedule = interrupt_depth == 0 && !machine_interrupts_enabled;
                 None
             }
         });
-        if let Some((current, next)) = preemption {
-            switch_to(current, next);
+        if let Some(intent) = preemption {
+            execute_switch(intent);
         }
         if defer_reschedule {
             request_reschedule();
@@ -339,13 +340,14 @@ impl RtosMutex {
             let interrupt_depth = INTERRUPT_DEPTH.borrow(cs).get();
             Ok(if interrupt_depth == 0 && machine_interrupts_enabled {
                 s.take_preemption_target(now)
+                    .map(|(current, next)| s.prepare_switch_intent(current, next))
             } else {
                 defer_reschedule = interrupt_depth == 0 && !machine_interrupts_enabled;
                 None
             })
         })?;
-        if let Some((current, next)) = preemption {
-            switch_to(current, next);
+        if let Some(intent) = preemption {
+            execute_switch(intent);
         }
         if defer_reschedule {
             request_reschedule();

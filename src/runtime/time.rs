@@ -72,6 +72,10 @@ pub(super) fn claim_timer_rearm_generation(cell: &Cell<u64>) -> u64 {
     generation
 }
 
+fn timer_rearm_ticket_is_current(cell: &Cell<u64>, ticket: u64) -> bool {
+    cell.get() == ticket
+}
+
 pub(super) fn rearm_timer() {
     let state = start_state();
     let Some(port) = state.port else {
@@ -104,11 +108,29 @@ pub(super) fn rearm_timer() {
             (port.disarm_timer)();
         }
 
-        let still_current =
-            critical_section::with(|cs| TIMER_REARM_GENERATION.borrow(cs).get() == generation);
+        let still_current = critical_section::with(|cs| {
+            timer_rearm_ticket_is_current(TIMER_REARM_GENERATION.borrow(cs), generation)
+        });
         if still_current {
             return;
         }
+    }
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    #[kani::proof]
+    fn stale_timer_rearm_ticket_cannot_validate_after_new_claim() {
+        let initial = kani::any::<u64>();
+        kani::assume(initial != u64::MAX);
+        let generation = Cell::new(initial);
+        let stale = claim_timer_rearm_generation(&generation);
+        let current = claim_timer_rearm_generation(&generation);
+
+        assert!(!timer_rearm_ticket_is_current(&generation, stale));
+        assert!(timer_rearm_ticket_is_current(&generation, current));
     }
 }
 

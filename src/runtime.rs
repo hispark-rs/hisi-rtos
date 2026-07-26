@@ -36,7 +36,7 @@ use crate::scheduling::{BudgetExpiry, BudgetState};
 use crate::{RunPolicy, TaskId};
 
 mod scheduler;
-use scheduler::{Sched, State, TaskFn, Tcb};
+use scheduler::{Sched, State, SwitchIntent, TaskFn, Tcb};
 mod reservation;
 use reservation::ReservationTable;
 mod sync;
@@ -415,7 +415,9 @@ fn spawn(
 /// Switch away from `prev` to the next ready task, busy-idling (waking sleepers)
 /// until one is runnable. `prev`'s state must already be set by the caller
 /// (Ready+queued for yield, Blocked for a wait, Free for exit).
-fn switch_to(prev: usize, next: usize) {
+fn execute_switch(intent: SwitchIntent) {
+    let prev = intent.previous.slot;
+    let next = intent.target.slot;
     if next == prev {
         critical_section::with(|cs| {
             SCHED.borrow_ref_mut(cs).tasks[next].state = State::Running;
@@ -430,17 +432,14 @@ fn switch_to(prev: usize, next: usize) {
         );
         let generation = critical_section::with(|cs| {
             let s = &mut *SCHED.borrow_ref_mut(cs);
-            assert_eq!(s.current, prev, "switch source is not the running task");
-            if s.recover_completed_switch_request(prev, next) {
+            if !s.commit_switch_intent(intent) {
                 return None;
             }
-            assert_eq!(s.forced_next, NIL, "a trap switch is already pending");
             assert!(
                 s.tasks[next].saved_frame != 0,
                 "target task has no trap frame"
             );
-            s.forced_next = next;
-            Some(s.tasks[prev].resume_generation)
+            Some(intent.previous_resume_generation)
         });
         let Some(generation) = generation else {
             rearm_timer();
@@ -487,12 +486,13 @@ fn switch_away(prev: usize) {
         return;
     }
     let now = now_ms();
-    let next = critical_section::with(|cs| {
+    let intent = critical_section::with(|cs| {
         let s = &mut *SCHED.borrow_ref_mut(cs);
         s.wake_sleepers(now);
-        s.ready_pop_or_idle()
+        let next = s.ready_pop_or_idle();
+        s.prepare_switch_intent(prev, next)
     });
-    switch_to(prev, next);
+    execute_switch(intent);
 }
 
 /// Yield the CPU: requeue the current task and run the next ready one.
@@ -508,10 +508,11 @@ fn yield_now() -> Result<(), DriverError> {
         // that task before requeueing the current one; otherwise a strict
         // priority queue would immediately select the yielding high-priority
         // task again and starve lower-priority initialization work.
-        Ok(s.take_yield_target(cur, now).map(|next| (cur, next)))
+        Ok(s.take_yield_target(cur, now)
+            .map(|next| s.prepare_switch_intent(cur, next)))
     })?;
-    if let Some((prev, next)) = target {
-        switch_to(prev, next);
+    if let Some(intent) = target {
+        execute_switch(intent);
     }
     reclaim_retired_stacks();
     Ok(())

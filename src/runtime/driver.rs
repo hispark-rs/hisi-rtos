@@ -154,7 +154,9 @@ impl Runtime for HisiRuntime {
             let outcome = cancel_wait_locked(scheduler, slot, now);
             let preemption =
                 if outcome == WaitCancellationOutcome::Cancelled && machine_interrupts_enabled {
-                    scheduler.take_preemption_target(now)
+                    scheduler
+                        .take_preemption_target(now)
+                        .map(|(current, next)| scheduler.prepare_switch_intent(current, next))
                 } else {
                     defer_reschedule = outcome == WaitCancellationOutcome::Cancelled
                         && !machine_interrupts_enabled;
@@ -162,8 +164,8 @@ impl Runtime for HisiRuntime {
                 };
             Ok((outcome, preemption))
         })?;
-        if let Some((current, next)) = preemption {
-            switch_to(current, next);
+        if let Some(intent) = preemption {
+            execute_switch(intent);
         }
         if defer_reschedule {
             request_reschedule();
@@ -186,12 +188,15 @@ impl Runtime for HisiRuntime {
         ensure_switch_delivery()?;
         let now = now_ms();
         let preemption = critical_section::with(|cs| {
-            SCHED
-                .borrow_ref_mut(cs)
+            let scheduler = &mut *SCHED.borrow_ref_mut(cs);
+            scheduler
                 .unlock_current_and_take_preemption(now)
+                .map(|target| {
+                    target.map(|(current, next)| scheduler.prepare_switch_intent(current, next))
+                })
         })?;
-        if let Some((current, next)) = preemption {
-            switch_to(current, next);
+        if let Some(intent) = preemption {
+            execute_switch(intent);
         }
         rearm_timer();
         Ok(())

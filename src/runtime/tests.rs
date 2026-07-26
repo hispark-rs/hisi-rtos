@@ -259,6 +259,77 @@ fn completed_switch_recovery_keeps_idle_out_of_ready_queues() {
 }
 
 #[test]
+fn switch_intent_is_committed_and_consumed_exactly_once() {
+    let mut scheduler = Sched::new();
+    scheduler.current = 0;
+    scheduler.tasks[0].identity_generation = 1;
+    scheduler.tasks[0].state = State::Ready;
+    scheduler.tasks[2].identity_generation = 7;
+    scheduler.tasks[2].state = State::Ready;
+
+    let intent = scheduler.prepare_switch_intent(0, 2);
+    assert!(scheduler.commit_switch_intent(intent));
+    assert_eq!(scheduler.consume_pending_switch(), Some((0, 2)));
+    assert_eq!(scheduler.consume_pending_switch(), None);
+    assert_eq!(scheduler.diagnostics.switch_intents_created, 1);
+    assert_eq!(scheduler.diagnostics.switch_intents_committed, 1);
+    assert_eq!(scheduler.diagnostics.switch_intents_completed, 1);
+}
+
+#[test]
+fn stale_switch_intent_restores_its_detached_target() {
+    let mut scheduler = Sched::new();
+    scheduler.current = 0;
+    scheduler.tasks[0].identity_generation = 1;
+    scheduler.tasks[0].state = State::Ready;
+    scheduler.tasks[2].identity_generation = 7;
+    scheduler.tasks[2].state = State::Ready;
+
+    let intent = scheduler.prepare_switch_intent(0, 2);
+    scheduler.tasks[0].state = State::Running;
+    scheduler.tasks[0].resume_generation = 1;
+
+    assert!(!scheduler.commit_switch_intent(intent));
+    assert_eq!(scheduler.ready_pop(), 2);
+    assert_eq!(scheduler.diagnostics.switch_intents_cancelled_stale, 1);
+    assert_eq!(scheduler.diagnostics.switch_race_recoveries, 1);
+}
+
+#[test]
+fn switch_intent_rejects_reused_task_identity() {
+    let mut scheduler = Sched::new();
+    scheduler.current = 0;
+    scheduler.tasks[0].identity_generation = 1;
+    scheduler.tasks[0].state = State::Ready;
+    scheduler.tasks[2].identity_generation = 7;
+    scheduler.tasks[2].state = State::Ready;
+
+    let intent = scheduler.prepare_switch_intent(0, 2);
+    scheduler.tasks[2].identity_generation = 8;
+
+    assert!(!scheduler.commit_switch_intent(intent));
+    assert!(scheduler.pending_switch.is_none());
+    assert_eq!(scheduler.diagnostics.switch_intents_cancelled_identity, 1);
+}
+
+#[test]
+fn switch_intent_source_identity_failure_restores_target() {
+    let mut scheduler = Sched::new();
+    scheduler.current = 0;
+    scheduler.tasks[0].identity_generation = 1;
+    scheduler.tasks[0].state = State::Ready;
+    scheduler.tasks[2].identity_generation = 7;
+    scheduler.tasks[2].state = State::Ready;
+
+    let intent = scheduler.prepare_switch_intent(0, 2);
+    scheduler.tasks[0].identity_generation = 2;
+
+    assert!(!scheduler.commit_switch_intent(intent));
+    assert_eq!(scheduler.ready_pop(), 2);
+    assert!(scheduler.pending_switch.is_none());
+}
+
+#[test]
 fn preemptive_ready_queue_uses_priority_then_fifo() {
     let mut scheduler = Sched::new();
     ready_task(&mut scheduler, 1, 8);

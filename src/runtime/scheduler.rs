@@ -10,6 +10,28 @@ pub(super) enum State {
     Throttled,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct TaskRef {
+    pub(super) slot: usize,
+    pub(super) identity_generation: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "a prepared switch intent must be committed or cancelled"]
+pub(super) struct SwitchIntent {
+    pub(super) sequence: u64,
+    pub(super) previous: TaskRef,
+    pub(super) target: TaskRef,
+    pub(super) previous_resume_generation: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PendingSwitch {
+    pub(super) sequence: u64,
+    pub(super) previous: TaskRef,
+    pub(super) target: TaskRef,
+}
+
 /// Task entry signature (matches the OSAL `osal_kthread_func`).
 pub(super) type TaskFn = extern "C" fn(*mut c_void) -> *mut c_void;
 
@@ -158,7 +180,10 @@ pub(super) struct Sched {
     pub(super) reservations: ReservationTable,
     pub(super) time_slice_pending: bool,
     pub(super) time_slice_deadline: u64,
-    pub(super) forced_next: usize,
+    pub(super) pending_switch: Option<PendingSwitch>,
+    pub(super) next_switch_sequence: u64,
+    #[cfg(any(kani, test, target_arch = "riscv32"))]
+    pub(super) last_consumed_switch_sequence: u64,
     pub(super) started: bool,
     pub(super) diagnostics: Diagnostics,
     pub(super) irq_started_at: u64,
@@ -178,7 +203,10 @@ impl Sched {
             reservations: ReservationTable::new(),
             time_slice_pending: false,
             time_slice_deadline: 0,
-            forced_next: NIL,
+            pending_switch: None,
+            next_switch_sequence: 0,
+            #[cfg(any(kani, test, target_arch = "riscv32"))]
+            last_consumed_switch_sequence: 0,
             started: false,
             diagnostics: Diagnostics::EMPTY,
             irq_started_at: NO_TIMESTAMP,
@@ -450,6 +478,110 @@ impl Sched {
         Some(next)
     }
 
+    fn task_ref(&self, slot: usize) -> TaskRef {
+        TaskRef {
+            slot,
+            identity_generation: self.tasks[slot].identity_generation,
+        }
+    }
+
+    fn task_ref_is_current(&self, task: TaskRef) -> bool {
+        self.tasks
+            .get(task.slot)
+            .is_some_and(|tcb| tcb.identity_generation == task.identity_generation)
+    }
+
+    pub(super) fn prepare_switch_intent(&mut self, previous: usize, target: usize) -> SwitchIntent {
+        assert!(
+            self.pending_switch.is_none(),
+            "cannot prepare a second switch intent"
+        );
+        assert!(
+            target == previous
+                || target == IDLE_SLOT
+                || (self.tasks[target].state == State::Ready && !self.ready_contains(target)),
+            "switch target is not detached from scheduler ownership"
+        );
+        self.next_switch_sequence = self
+            .next_switch_sequence
+            .checked_add(1)
+            .expect("switch intent sequence exhausted");
+        let intent = SwitchIntent {
+            sequence: self.next_switch_sequence,
+            previous: self.task_ref(previous),
+            target: self.task_ref(target),
+            previous_resume_generation: self.tasks[previous].resume_generation,
+        };
+        self.diagnostics.switch_intents_created =
+            self.diagnostics.switch_intents_created.saturating_add(1);
+        intent
+    }
+
+    /// Commits a thread-mode switch intent unless an intervening IRQ already
+    /// completed the handoff and resumed the source task.
+    pub(super) fn commit_switch_intent(&mut self, intent: SwitchIntent) -> bool {
+        let previous_identity_matches = self.task_ref_is_current(intent.previous);
+        let target_identity_matches = self.task_ref_is_current(intent.target);
+        if !previous_identity_matches || !target_identity_matches {
+            if target_identity_matches {
+                self.restore_detached_switch_target(intent.target.slot);
+            }
+            self.diagnostics.switch_intents_cancelled_identity = self
+                .diagnostics
+                .switch_intents_cancelled_identity
+                .saturating_add(1);
+            return false;
+        }
+
+        let previous = intent.previous.slot;
+        let target = intent.target.slot;
+        if self.current != previous
+            || self.tasks[previous].resume_generation != intent.previous_resume_generation
+            || self.tasks[previous].state == State::Running
+        {
+            if self.current == previous && self.tasks[previous].state == State::Running {
+                self.recover_completed_switch_request(previous, target);
+            } else {
+                self.restore_detached_switch_target(target);
+            }
+            self.diagnostics.switch_intents_cancelled_stale = self
+                .diagnostics
+                .switch_intents_cancelled_stale
+                .saturating_add(1);
+            return false;
+        }
+
+        assert!(
+            self.pending_switch.is_none(),
+            "a trap switch is already pending"
+        );
+        self.pending_switch = Some(PendingSwitch {
+            sequence: intent.sequence,
+            previous: intent.previous,
+            target: intent.target,
+        });
+        self.diagnostics.switch_intents_committed =
+            self.diagnostics.switch_intents_committed.saturating_add(1);
+        true
+    }
+
+    #[cfg(any(kani, test, target_arch = "riscv32"))]
+    pub(super) fn consume_pending_switch(&mut self) -> Option<(usize, usize)> {
+        let pending = self.pending_switch.take()?;
+        assert!(
+            self.task_ref_is_current(pending.previous) && self.task_ref_is_current(pending.target),
+            "pending switch task identity changed"
+        );
+        assert!(
+            pending.sequence > self.last_consumed_switch_sequence,
+            "pending switch sequence was already consumed"
+        );
+        self.last_consumed_switch_sequence = pending.sequence;
+        self.diagnostics.switch_intents_completed =
+            self.diagnostics.switch_intents_completed.saturating_add(1);
+        Some((pending.previous.slot, pending.target.slot))
+    }
+
     /// Cancels a detached switch target after an IRQ already switched away
     /// from and later resumed `previous` before thread mode called `switch_to`.
     pub(super) fn recover_completed_switch_request(
@@ -460,17 +592,21 @@ impl Sched {
         if self.current != previous || self.tasks[previous].state != State::Running {
             return false;
         }
-        if detached_next != IDLE_SLOT
-            && self.tasks[detached_next].state == State::Ready
-            && !self.ready_contains(detached_next)
-        {
-            // The caller popped this target before the intervening IRQ. It is
-            // therefore detached, so restore it without resetting ready_since.
-            self.ready_push(detached_next);
-        }
+        self.restore_detached_switch_target(detached_next);
         self.diagnostics.switch_race_recoveries =
             self.diagnostics.switch_race_recoveries.saturating_add(1);
         true
+    }
+
+    fn restore_detached_switch_target(&mut self, target: usize) {
+        if target != IDLE_SLOT
+            && self.tasks[target].state == State::Ready
+            && !self.ready_contains(target)
+        {
+            // Preserve the original ready timestamp while returning ownership
+            // from the cancelled intent to the ready queue.
+            self.ready_push(target);
+        }
     }
 
     pub(super) fn take_reschedule_target(
@@ -557,10 +693,8 @@ impl Sched {
         let current = self.current;
         let current_priority = self.tasks[current].priority;
         let time_slice = self.time_slice_pending;
-        let target = if self.forced_next != NIL {
-            let next = self.forced_next;
-            self.forced_next = NIL;
-            Some((current, next))
+        let target = if self.pending_switch.is_some() {
+            self.consume_pending_switch()
         } else if self.tasks[current].state != State::Running {
             Some((current, self.ready_pop_or_idle()))
         } else {
@@ -881,5 +1015,61 @@ impl Sched {
 
     pub(super) fn has_equal_priority_ready(&self, priority: u8) -> bool {
         self.ready_head[priority as usize] != NIL
+    }
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    fn prepared_scheduler() -> (Sched, SwitchIntent) {
+        let mut scheduler = Sched::new();
+        scheduler.current = 0;
+        scheduler.tasks[0].identity_generation = 1;
+        scheduler.tasks[0].state = State::Ready;
+        scheduler.tasks[2].identity_generation = 7;
+        scheduler.tasks[2].state = State::Ready;
+        let intent = scheduler.prepare_switch_intent(0, 2);
+        (scheduler, intent)
+    }
+
+    #[kani::proof]
+    fn switch_intent_is_consumed_at_most_once() {
+        let (mut scheduler, intent) = prepared_scheduler();
+
+        assert!(scheduler.commit_switch_intent(intent));
+        assert_eq!(scheduler.consume_pending_switch(), Some((0, 2)));
+        assert_eq!(scheduler.consume_pending_switch(), None);
+        assert_eq!(scheduler.diagnostics.switch_intents_completed, 1);
+    }
+
+    #[kani::proof]
+    fn stale_switch_identity_cannot_commit() {
+        let (mut scheduler, intent) = prepared_scheduler();
+        let target_was_reused = kani::any::<bool>();
+        if target_was_reused {
+            scheduler.tasks[2].identity_generation =
+                scheduler.tasks[2].identity_generation.wrapping_add(1);
+        } else {
+            scheduler.tasks[0].identity_generation =
+                scheduler.tasks[0].identity_generation.wrapping_add(1);
+        }
+
+        assert!(!scheduler.commit_switch_intent(intent));
+        assert!(scheduler.pending_switch.is_none());
+        if !target_was_reused {
+            assert!(scheduler.ready_contains(2));
+        }
+    }
+
+    #[kani::proof]
+    fn resumed_previous_cancels_intent_and_restores_target() {
+        let (mut scheduler, intent) = prepared_scheduler();
+        scheduler.tasks[0].state = State::Running;
+        scheduler.tasks[0].resume_generation = scheduler.tasks[0].resume_generation.wrapping_add(1);
+
+        assert!(!scheduler.commit_switch_intent(intent));
+        assert!(scheduler.ready_contains(2));
+        assert!(scheduler.pending_switch.is_none());
     }
 }

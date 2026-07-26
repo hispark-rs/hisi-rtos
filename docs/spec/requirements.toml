@@ -207,13 +207,15 @@ host_tests = ["tests/ui/ported_policy.rs"]
 
 [[requirement]]
 id = "RTOS-PORT-003"
-implementation = ["src/runtime.rs:machine_interrupts_enabled", "src/runtime.rs:ensure_switch_delivery", "src/runtime.rs:switch_to"]
+implementation = ["src/runtime.rs:machine_interrupts_enabled", "src/runtime.rs:ensure_switch_delivery", "src/runtime.rs:execute_switch"]
 host_tests = ["tests::ported_thread_switch_requires_mie_but_irq_epilogue_does_not"]
 
 [[requirement]]
 id = "RTOS-PORT-004"
-implementation = ["src/runtime.rs:switch_to", "src/runtime/scheduler.rs:Sched::recover_completed_switch_request"]
-host_tests = ["tests::completed_irq_switch_restores_the_detached_thread_target", "tests::pending_thread_switch_is_not_mistaken_for_a_completed_irq_switch", "tests::completed_switch_recovery_does_not_duplicate_an_already_requeued_target"]
+implementation = ["src/runtime.rs:execute_switch", "src/runtime/scheduler.rs:Sched::prepare_switch_intent", "src/runtime/scheduler.rs:Sched::commit_switch_intent", "src/runtime/scheduler.rs:Sched::consume_pending_switch", "src/runtime/scheduler.rs:Sched::recover_completed_switch_request"]
+host_tests = ["tests::completed_irq_switch_restores_the_detached_thread_target", "tests::pending_thread_switch_is_not_mistaken_for_a_completed_irq_switch", "tests::completed_switch_recovery_does_not_duplicate_an_already_requeued_target", "tests::switch_intent_is_committed_and_consumed_exactly_once", "tests::stale_switch_intent_restores_its_detached_target", "tests::switch_intent_rejects_reused_task_identity", "tests::switch_intent_source_identity_failure_restores_target"]
+tla = "spec/SwitchIntent.tla:PendingIffCommitted; spec/SwitchIntent.tla:TerminalExactlyOnce; spec/SwitchIntent.tla:DetachedOwnership"
+kani = "runtime::scheduler::proofs::switch_intent_is_consumed_at_most_once; runtime::scheduler::proofs::stale_switch_identity_cannot_commit; runtime::scheduler::proofs::resumed_previous_cancels_intent_and_restores_target"
 
 [[requirement]]
 id = "RTOS-TIMER-001"
@@ -229,8 +231,10 @@ hil = ["A3_RTOS_BUDGET_OK"]
 
 [[requirement]]
 id = "RTOS-TIMER-003"
-implementation = ["src/runtime/time.rs:claim_timer_rearm_generation", "src/runtime/time.rs:rearm_timer"]
+implementation = ["src/runtime/time.rs:claim_timer_rearm_generation", "src/runtime/time.rs:timer_rearm_ticket_is_current", "src/runtime/time.rs:rearm_timer"]
 host_tests = ["tests::stale_timer_programming_ticket_requires_retry"]
+tla = "spec/TimerRearm.tla:StableProgrammingIsCurrent"
+kani = "runtime::time::proofs::stale_timer_rearm_ticket_cannot_validate_after_new_claim"
 
 [[requirement]]
 id = "RTOS-CONTEXT-001"
