@@ -154,12 +154,16 @@ host_tests = ["tests::task_metrics_account_dispatch_cpu_and_ready_latency", "tes
 id = "RTOS-WAIT-001"
 implementation = ["src/runtime/scheduler.rs:Sched::wake_sleepers", "src/runtime/sync.rs:Semaphore::down_timeout", "src/runtime/sync.rs:cancel_wait_locked"]
 host_tests = ["tests::timed_semaphore_wait_wakes_only_after_its_deadline", "tests::forever_semaphore_wait_is_not_treated_as_an_expired_deadline", "tests::cancelling_queued_semaphore_wait_makes_task_ready_without_minting_a_count", "tests::cancelling_mutex_wait_restores_owner_priority"]
+tla = "spec/WaitLinearization.tla:SingleSchedulerOwner; spec/WaitLinearization.tla:TerminalResultUnique"
+kani = "runtime::sync::proofs::semaphore_signal_cancel_race_preserves_queue_ownership_and_permit; runtime::sync::proofs::semaphore_signal_timeout_race_preserves_queue_ownership_and_permit"
 hil = ["A3_SCHEDULER_STRESS_OK"]
 
 [[requirement]]
 id = "RTOS-WAIT-002"
 implementation = ["src/runtime/sync.rs:Semaphore::up", "src/runtime/scheduler.rs:Tcb::sem_granted"]
 host_tests = ["tests::timed_semaphore_wait_wakes_only_after_its_deadline"]
+tla = "spec/WaitLinearization.tla:GrantOnlyReady; spec/WaitLinearization.tla:ResourceConservation"
+kani = "runtime::sync::proofs::semaphore_signal_cancel_race_preserves_queue_ownership_and_permit; runtime::sync::proofs::semaphore_signal_timeout_race_preserves_queue_ownership_and_permit"
 
 [[requirement]]
 id = "RTOS-WAIT-003"
@@ -172,7 +176,8 @@ tla = "spec/ResourceLifecycle.tla:StaleDestroyPreservesLiveResource; spec/Resour
 id = "RTOS-WAIT-004"
 implementation = ["src/runtime/sync.rs:cancel_wait_locked", "src/runtime/driver.rs:HisiRuntime::cancel_wait"]
 host_tests = ["tests::cancelling_queued_semaphore_wait_makes_task_ready_without_minting_a_count", "tests::cancelling_semaphore_handoff_returns_exactly_one_count", "tests::cancelling_mutex_wait_restores_owner_priority", "tests::cancelling_mutex_handoff_releases_unconsumed_ownership"]
-tla = "spec/ResourceLifecycle.tla:NoGrantWithoutLiveResource; spec/ResourceLifecycle.tla:GrantIsNeverDuplicated"
+tla = "spec/ResourceLifecycle.tla:NoGrantWithoutLiveResource; spec/ResourceLifecycle.tla:GrantIsNeverDuplicated; spec/WaitLinearization.tla:TerminalResultUnique; spec/WaitLinearization.tla:ResourceConservation"
+kani = "runtime::sync::proofs::semaphore_signal_cancel_race_preserves_queue_ownership_and_permit"
 
 [[requirement]]
 id = "RTOS-MUTEX-001"

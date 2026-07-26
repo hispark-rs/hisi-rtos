@@ -661,22 +661,7 @@ impl Sched {
             if self.tasks[i].state == State::Sleeping && now >= self.tasks[i].wake_at {
                 self.make_ready(i, now);
                 self.diagnostics.sleeper_wakes = self.diagnostics.sleeper_wakes.saturating_add(1);
-            } else if self.tasks[i].state == State::Blocked
-                && self.tasks[i].waiting_sem != 0
-                && self.tasks[i].wake_at != 0
-                && now >= self.tasks[i].wake_at
-            {
-                let sem = self.tasks[i].waiting_sem as *const Semaphore;
-                // SAFETY: a timed waiter keeps the semaphore alive for the
-                // duration of the call, and all queue mutation is serialized by
-                // the scheduler critical section.
-                let sem_state = unsafe { &mut *(*sem).inner.get() };
-                remove_waiter(self, sem_state, i);
-                self.tasks[i].waiting_sem = 0;
-                self.tasks[i].sem_granted = false;
-                self.tasks[i].granted_sem = 0;
-                self.tasks[i].wake_at = 0;
-                self.make_ready(i, now);
+            } else if timeout_semaphore_waiter_locked(self, i, now) {
                 self.diagnostics.semaphore_timeouts =
                     self.diagnostics.semaphore_timeouts.saturating_add(1);
             } else if self.tasks[i].state == State::Blocked

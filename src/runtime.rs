@@ -42,7 +42,7 @@ use reservation::ReservationTable;
 mod sync;
 use sync::{
     MutexState, RtosMutex, SemState, Semaphore, cancel_wait_locked, enqueue_mutex_waiter,
-    enqueue_waiter, remove_mutex_waiter, remove_waiter,
+    enqueue_waiter, remove_mutex_waiter, remove_waiter, timeout_semaphore_waiter_locked,
 };
 #[cfg(test)]
 use sync::{release_mutex_locked, release_semaphore_locked};

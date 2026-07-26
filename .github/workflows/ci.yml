@@ -16,7 +16,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: rustup component add rust-src
       - run: cargo fmt --all -- --check
-      - run: uv run scripts/check-requirements.py
+      - run: uv run --script scripts/check-requirements.py
       - run: cargo test --locked --target x86_64-unknown-linux-gnu
       - run: cargo clippy -Zbuild-std=core --target riscv32imfc-unknown-none-elf -- -D warnings
       - run: cargo build -Zbuild-std=core --target riscv32imfc-unknown-none-elf
@@ -40,6 +40,16 @@ jobs:
         with:
           kani-version: "0.67.0"
           args: "--harness destroyed_resource_handle_cannot_be_resolved_twice"
+      - name: Verify signal-cancel wait races preserve ownership and permits
+        uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+        with:
+          kani-version: "0.67.0"
+          args: "--harness semaphore_signal_cancel_race_preserves_queue_ownership_and_permit"
+      - name: Verify signal-timeout wait races preserve ownership and permits
+        uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+        with:
+          kani-version: "0.67.0"
+          args: "--harness semaphore_signal_timeout_race_preserves_queue_ownership_and_permit"
 
   tla:
     runs-on: ubuntu-latest
@@ -58,3 +68,6 @@ jobs:
       - name: Check resource lifecycle model
         working-directory: spec
         run: java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config ResourceLifecycle.cfg ResourceLifecycle.tla
+      - name: Check wait linearization model
+        working-directory: spec
+        run: java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config WaitLinearization.cfg WaitLinearization.tla

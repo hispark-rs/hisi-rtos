@@ -41,7 +41,10 @@ pub(super) fn enqueue_waiter(sched: &mut Sched, state: &mut SemState, task: usiz
 pub(super) fn remove_waiter(sched: &mut Sched, state: &mut SemState, task: usize) {
     let mut previous = NIL;
     let mut current = state.wait_head;
-    while current != NIL {
+    for _ in 0..TASK_SLOT_COUNT {
+        if current == NIL {
+            return;
+        }
         if current == task {
             let next = sched.tasks[current].next;
             if previous == NIL {
@@ -58,6 +61,10 @@ pub(super) fn remove_waiter(sched: &mut Sched, state: &mut SemState, task: usize
         previous = current;
         current = sched.tasks[current].next;
     }
+    debug_assert_eq!(
+        current, NIL,
+        "semaphore wait queue exceeds task capacity or cycles"
+    );
 }
 // SAFETY: `inner` is only accessed inside `critical_section::with` on a single
 // hart, which serialises every access.
@@ -109,8 +116,8 @@ impl Semaphore {
             switch_away(current_id());
             critical_section::with(|cs| {
                 let s = &mut *SCHED.borrow_ref_mut(cs);
-                s.tasks[s.current].sem_granted = false;
-                s.tasks[s.current].granted_sem = 0;
+                let current = s.current;
+                consume_semaphore_grant_locked(s, current);
             });
         }
         Ok(())
@@ -163,10 +170,8 @@ impl Semaphore {
                 switch_away(current);
                 Ok(critical_section::with(|cs| {
                     let s = &mut *SCHED.borrow_ref_mut(cs);
-                    let granted = s.tasks[s.current].sem_granted;
-                    s.tasks[s.current].sem_granted = false;
-                    s.tasks[s.current].granted_sem = 0;
-                    granted
+                    let current = s.current;
+                    consume_semaphore_grant_locked(s, current)
                 }))
             }
         }
@@ -220,6 +225,13 @@ pub(super) fn release_semaphore_locked(sched: &mut Sched, state: &mut SemState, 
     sched.make_ready(waiter, now);
     sched.diagnostics.semaphore_wakes = sched.diagnostics.semaphore_wakes.saturating_add(1);
     waiter
+}
+
+fn consume_semaphore_grant_locked(sched: &mut Sched, task: usize) -> bool {
+    let granted = sched.tasks[task].sem_granted;
+    sched.tasks[task].sem_granted = false;
+    sched.tasks[task].granted_sem = 0;
+    granted
 }
 
 // Recursive mutex with priority-ordered waiters and priority inheritance.
@@ -385,18 +397,7 @@ pub(super) fn cancel_wait_locked(
     task: usize,
     now: u64,
 ) -> WaitCancellationOutcome {
-    let waiting_sem = sched.tasks[task].waiting_sem;
-    if waiting_sem != 0 {
-        // SAFETY: a queued waiter keeps the semaphore allocation live and this
-        // function is called with exclusive scheduler/queue access.
-        let state = unsafe { &mut *(*(waiting_sem as *const Semaphore)).inner.get() };
-        remove_waiter(sched, state, task);
-        sched.tasks[task].waiting_sem = 0;
-        sched.tasks[task].wake_at = 0;
-        sched.tasks[task].sem_granted = false;
-        if sched.tasks[task].state == State::Blocked {
-            sched.make_ready(task, now);
-        }
+    if cancel_semaphore_wait_locked(sched, task, now) {
         return WaitCancellationOutcome::Cancelled;
     }
 
@@ -418,16 +419,6 @@ pub(super) fn cancel_wait_locked(
         return WaitCancellationOutcome::Cancelled;
     }
 
-    let granted_sem = sched.tasks[task].granted_sem;
-    if granted_sem != 0 {
-        sched.tasks[task].granted_sem = 0;
-        sched.tasks[task].sem_granted = false;
-        // SAFETY: an unconsumed direct grant keeps the resource allocation live.
-        let state = unsafe { &mut *(*(granted_sem as *const Semaphore)).inner.get() };
-        release_semaphore_locked(sched, state, now);
-        return WaitCancellationOutcome::Cancelled;
-    }
-
     let granted_mutex = sched.tasks[task].granted_mutex;
     if granted_mutex != 0 {
         sched.tasks[task].granted_mutex = 0;
@@ -443,6 +434,57 @@ pub(super) fn cancel_wait_locked(
     }
 
     WaitCancellationOutcome::NotWaiting
+}
+
+fn cancel_semaphore_wait_locked(sched: &mut Sched, task: usize, now: u64) -> bool {
+    let waiting_sem = sched.tasks[task].waiting_sem;
+    if waiting_sem != 0 {
+        // SAFETY: a queued waiter keeps the semaphore allocation live and this
+        // function is called with exclusive scheduler/queue access.
+        let state = unsafe { &mut *(*(waiting_sem as *const Semaphore)).inner.get() };
+        remove_waiter(sched, state, task);
+        sched.tasks[task].waiting_sem = 0;
+        sched.tasks[task].wake_at = 0;
+        sched.tasks[task].sem_granted = false;
+        if sched.tasks[task].state == State::Blocked {
+            sched.make_ready(task, now);
+        }
+        return true;
+    }
+
+    let granted_sem = sched.tasks[task].granted_sem;
+    if granted_sem != 0 {
+        sched.tasks[task].granted_sem = 0;
+        sched.tasks[task].sem_granted = false;
+        // SAFETY: an unconsumed direct grant keeps the resource allocation live.
+        let state = unsafe { &mut *(*(granted_sem as *const Semaphore)).inner.get() };
+        release_semaphore_locked(sched, state, now);
+        return true;
+    }
+
+    false
+}
+
+pub(super) fn timeout_semaphore_waiter_locked(sched: &mut Sched, task: usize, now: u64) -> bool {
+    if sched.tasks[task].state != State::Blocked
+        || sched.tasks[task].waiting_sem == 0
+        || sched.tasks[task].wake_at == 0
+        || now < sched.tasks[task].wake_at
+    {
+        return false;
+    }
+
+    let semaphore = sched.tasks[task].waiting_sem as *const Semaphore;
+    // SAFETY: a timed waiter keeps the semaphore alive for the duration of the
+    // call, and all queue mutation is serialized by the scheduler critical section.
+    let state = unsafe { &mut *(*semaphore).inner.get() };
+    remove_waiter(sched, state, task);
+    sched.tasks[task].waiting_sem = 0;
+    sched.tasks[task].sem_granted = false;
+    sched.tasks[task].granted_sem = 0;
+    sched.tasks[task].wake_at = 0;
+    sched.make_ready(task, now);
+    true
 }
 
 pub(super) fn enqueue_mutex_waiter(sched: &mut Sched, state: &mut MutexState, task: usize) {
@@ -467,7 +509,10 @@ pub(super) fn enqueue_mutex_waiter(sched: &mut Sched, state: &mut MutexState, ta
 pub(super) fn remove_mutex_waiter(sched: &mut Sched, state: &mut MutexState, task: usize) {
     let mut previous = NIL;
     let mut current = state.wait_head;
-    while current != NIL {
+    for _ in 0..TASK_SLOT_COUNT {
+        if current == NIL {
+            return;
+        }
         if current == task {
             let next = sched.tasks[current].next;
             if previous == NIL {
@@ -483,6 +528,134 @@ pub(super) fn remove_mutex_waiter(sched: &mut Sched, state: &mut MutexState, tas
         }
         previous = current;
         current = sched.tasks[current].next;
+    }
+    debug_assert_eq!(
+        current, NIL,
+        "mutex wait queue exceeds task capacity or cycles"
+    );
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    fn semaphore_queue_contains(sched: &Sched, state: &SemState, task: usize) -> bool {
+        let mut current = state.wait_head;
+        for _ in 0..TASK_SLOT_COUNT {
+            if current == task {
+                return true;
+            }
+            if current == NIL {
+                return false;
+            }
+            current = sched.tasks[current].next;
+        }
+        false
+    }
+
+    fn assert_one_post_is_conserved(
+        semaphore: &Semaphore,
+        scheduler: &Sched,
+        waiter: usize,
+        consumed: bool,
+    ) {
+        let semaphore_pointer = core::ptr::addr_of!(*semaphore) as usize;
+        // SAFETY: the proof harness exclusively owns the semaphore.
+        let state = unsafe { &*semaphore.inner.get() };
+        let queued = semaphore_queue_contains(scheduler, state, waiter);
+        let grant_pending = scheduler.tasks[waiter].granted_sem == semaphore_pointer;
+
+        assert_eq!(queued, scheduler.tasks[waiter].waiting_sem != 0);
+        assert!(!(queued && grant_pending));
+        assert!(!grant_pending || scheduler.tasks[waiter].state == State::Ready);
+        assert!((state.count == 0) || (state.count == 1));
+
+        let accounted = (state.count as u8) + u8::from(grant_pending) + u8::from(consumed);
+        assert_eq!(accounted, 1);
+    }
+
+    fn blocked_waiter(semaphore: &Semaphore) -> (Sched, usize) {
+        let mut scheduler = Sched::new();
+        let waiter = IDLE_SLOT + 1;
+        let semaphore_pointer = core::ptr::addr_of!(*semaphore) as usize;
+
+        scheduler.tasks[waiter].state = State::Blocked;
+        scheduler.tasks[waiter].waiting_sem = semaphore_pointer;
+        scheduler.tasks[waiter].wake_at = 1;
+        // SAFETY: the local scheduler and semaphore are exclusively owned by
+        // this harness and the semaphore is not moved after its address escapes.
+        unsafe {
+            enqueue_waiter(&mut scheduler, &mut *semaphore.inner.get(), waiter);
+        }
+        (scheduler, waiter)
+    }
+
+    fn signal_cancel_case<
+        const CANCEL_BEFORE: bool,
+        const CANCEL_AFTER: bool,
+        const CONSUME: bool,
+    >() {
+        let semaphore = Semaphore::new(0);
+        let (mut scheduler, waiter) = blocked_waiter(&semaphore);
+        let mut consumed = false;
+
+        if CANCEL_BEFORE {
+            assert!(cancel_semaphore_wait_locked(&mut scheduler, waiter, 0));
+        }
+        // SAFETY: exclusive access to the local semaphore.
+        unsafe {
+            release_semaphore_locked(&mut scheduler, &mut *semaphore.inner.get(), 0);
+        }
+        if CANCEL_AFTER {
+            assert!(cancel_semaphore_wait_locked(&mut scheduler, waiter, 0));
+        }
+        if CONSUME && scheduler.tasks[waiter].granted_sem != 0 {
+            consumed = consume_semaphore_grant_locked(&mut scheduler, waiter);
+        }
+        assert_one_post_is_conserved(&semaphore, &scheduler, waiter, consumed);
+    }
+
+    // RTOS-WAIT-001/002/004: signal and cancellation compete through the
+    // production direct-handoff and cancel paths.
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn semaphore_signal_cancel_race_preserves_queue_ownership_and_permit() {
+        signal_cancel_case::<false, false, false>();
+        signal_cancel_case::<false, false, true>();
+        signal_cancel_case::<true, false, false>();
+        signal_cancel_case::<false, true, false>();
+        signal_cancel_case::<false, true, true>();
+    }
+
+    fn signal_timeout_case<const TIMEOUT_BEFORE: bool, const CONSUME: bool>() {
+        let semaphore = Semaphore::new(0);
+        let (mut scheduler, waiter) = blocked_waiter(&semaphore);
+        let mut consumed = false;
+
+        if TIMEOUT_BEFORE {
+            assert!(timeout_semaphore_waiter_locked(&mut scheduler, waiter, 1));
+        }
+        // SAFETY: exclusive access to the local semaphore.
+        unsafe {
+            release_semaphore_locked(&mut scheduler, &mut *semaphore.inner.get(), 0);
+        }
+        if !TIMEOUT_BEFORE {
+            assert!(!timeout_semaphore_waiter_locked(&mut scheduler, waiter, 1));
+        }
+        if CONSUME && scheduler.tasks[waiter].granted_sem != 0 {
+            consumed = consume_semaphore_grant_locked(&mut scheduler, waiter);
+        }
+        assert_one_post_is_conserved(&semaphore, &scheduler, waiter, consumed);
+    }
+
+    // RTOS-WAIT-001/002: signal and timeout compete through the production
+    // timer scan. A timeout after handoff is a no-op because the task is Ready.
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn semaphore_signal_timeout_race_preserves_queue_ownership_and_permit() {
+        signal_timeout_case::<true, false>();
+        signal_timeout_case::<false, false>();
+        signal_timeout_case::<false, true>();
     }
 }
 
