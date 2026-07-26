@@ -182,13 +182,17 @@ kani = "runtime::sync::proofs::semaphore_signal_cancel_race_preserves_queue_owne
 [[requirement]]
 id = "RTOS-MUTEX-001"
 implementation = ["src/runtime/sync.rs:RtosMutex::unlock", "src/runtime/sync.rs:pop_mutex_waiter"]
-host_tests = ["tests::mutex_handoff_transfers_remaining_inheritance_to_new_owner"]
+host_tests = ["tests::mutex_handoff_transfers_remaining_inheritance_to_new_owner", "tests::equal_priority_mutex_waiters_handoff_in_fifo_order"]
+tla = "spec/PriorityInheritance.tla:PriorityQueuesAreStable; spec/PriorityInheritance.tla:DirectHandoffUsesQueueHead"
+kani = "runtime::sync::proofs::mutex_handoff_preserves_priority_fifo_and_restores_owner"
 hil = ["A3_PRIORITY_INHERITANCE_OK"]
 
 [[requirement]]
 id = "RTOS-MUTEX-002"
 implementation = ["src/runtime/scheduler.rs:Sched::refresh_inherited_priority"]
-host_tests = ["tests::chained_mutex_inheritance_propagates_effective_priority", "tests::timed_out_mutex_waiter_restores_owner_priority"]
+host_tests = ["tests::chained_mutex_inheritance_propagates_effective_priority", "tests::timed_out_mutex_waiter_restores_owner_priority", "tests::cancelling_mutex_wait_restores_owner_priority", "tests::mutex_cycle_is_rejected_without_mutating_wait_graph"]
+tla = "spec/PriorityInheritance.tla:DonationPropagatesAndRestores; spec/PriorityInheritance.tla:RejectedCyclePreservesGraph"
+kani = "runtime::sync::proofs::mutex_handoff_preserves_priority_fifo_and_restores_owner; runtime::sync::proofs::mutex_wait_chain_rejects_cycles"
 hil = ["A3_PRIORITY_INHERITANCE_OK"]
 
 [[requirement]]

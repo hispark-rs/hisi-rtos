@@ -963,6 +963,67 @@ fn mutex_handoff_transfers_remaining_inheritance_to_new_owner() {
 }
 
 #[test]
+fn equal_priority_mutex_waiters_handoff_in_fifo_order() {
+    let mut scheduler = Sched::new();
+    let mutex = RtosMutex::new();
+    let owner = 0;
+    let first = IDLE_SLOT + 1;
+    let second = first + 1;
+
+    scheduler.tasks[owner].state = State::Running;
+    scheduler.tasks[owner].base_priority = 20;
+    scheduler.tasks[owner].priority = 20;
+    for waiter in [first, second] {
+        scheduler.tasks[waiter].state = State::Blocked;
+        scheduler.tasks[waiter].base_priority = 2;
+        scheduler.tasks[waiter].priority = 2;
+        scheduler.tasks[waiter].waiting_mutex = core::ptr::addr_of!(mutex) as usize;
+    }
+    unsafe {
+        let state = &mut *mutex.inner.get();
+        state.owner = owner;
+        state.depth = 1;
+        enqueue_mutex_waiter(&mut scheduler, state, first);
+        enqueue_mutex_waiter(&mut scheduler, state, second);
+    }
+    scheduler.add_inheritance(owner, 2);
+    scheduler.add_inheritance(owner, 2);
+
+    unsafe { release_mutex_locked(&mut scheduler, &mut *mutex.inner.get(), owner, 0) };
+
+    let state = unsafe { &*mutex.inner.get() };
+    assert_eq!(state.owner, first);
+    assert_eq!(state.wait_head, second);
+    assert_eq!(state.wait_tail, second);
+}
+
+#[test]
+fn mutex_cycle_is_rejected_without_mutating_wait_graph() {
+    let mut scheduler = Sched::new();
+    let outer = RtosMutex::new();
+    let inner = RtosMutex::new();
+    let low = 0;
+    let mid = IDLE_SLOT + 1;
+
+    unsafe {
+        (*outer.inner.get()).owner = low;
+        (*inner.inner.get()).owner = mid;
+    }
+    scheduler.tasks[mid].state = State::Blocked;
+    scheduler.tasks[mid].waiting_mutex = core::ptr::addr_of!(outer) as usize;
+
+    let outer_owner_before = unsafe { (*outer.inner.get()).owner };
+    let inner_owner_before = unsafe { (*inner.inner.get()).owner };
+    assert!(sync::mutex_chain_contains(&scheduler, mid, low));
+    assert_eq!(unsafe { (*outer.inner.get()).owner }, outer_owner_before);
+    assert_eq!(unsafe { (*inner.inner.get()).owner }, inner_owner_before);
+    assert_eq!(
+        scheduler.tasks[mid].waiting_mutex,
+        core::ptr::addr_of!(outer) as usize
+    );
+}
+
+#[test]
 fn base_priority_change_preserves_and_then_restores_inheritance() {
     let mut scheduler = Sched::new();
     scheduler.tasks[0].state = State::Running;

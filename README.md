@@ -48,5 +48,6 @@ released, or exhausted generation-bearing tokens fail closed.
 
 The normative scheduler contract and machine-readable evidence map live in
 [`docs/spec/scheduling.md`](docs/spec/scheduling.md) and
-[`docs/spec/requirements.toml`](docs/spec/requirements.toml). The periodic
-CPU-quota model is executable with TLC from `spec/SchedulerBudget.tla`.
+[`docs/spec/requirements.toml`](docs/spec/requirements.toml). Executable TLA+
+models under `spec/` cover periodic CPU quota, resource/wait lifecycle, wait
+linearization, and bounded priority inheritance.

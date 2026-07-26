@@ -50,6 +50,16 @@ jobs:
         with:
           kani-version: "0.67.0"
           args: "--harness semaphore_signal_timeout_race_preserves_queue_ownership_and_permit"
+      - name: Verify mutex handoff preserves priority FIFO and inheritance
+        uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+        with:
+          kani-version: "0.67.0"
+          args: "--harness mutex_handoff_preserves_priority_fifo_and_restores_owner"
+      - name: Verify mutex wait chains reject cycles
+        uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+        with:
+          kani-version: "0.67.0"
+          args: "--harness mutex_wait_chain_rejects_cycles"
 
   tla:
     runs-on: ubuntu-latest
@@ -71,3 +81,6 @@ jobs:
       - name: Check wait linearization model
         working-directory: spec
         run: java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config WaitLinearization.cfg WaitLinearization.tla
+      - name: Check priority inheritance model
+        working-directory: spec
+        run: java -cp /tmp/tla2tools.jar tlc2.TLC -workers 4 -config PriorityInheritance.cfg PriorityInheritance.tla

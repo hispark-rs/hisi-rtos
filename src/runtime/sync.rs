@@ -657,6 +657,75 @@ mod proofs {
         signal_timeout_case::<false, false>();
         signal_timeout_case::<false, true>();
     }
+
+    // RTOS-MUTEX-001/002: the production queue keeps equal-priority waiters
+    // FIFO, hands ownership directly to the highest-priority waiter, transfers
+    // the remaining donation, and restores the former owner's base priority.
+    #[kani::proof]
+    #[kani::unwind(40)]
+    fn mutex_handoff_preserves_priority_fifo_and_restores_owner() {
+        let mutex = RtosMutex::new();
+        let mut scheduler = Sched::new();
+        let owner = 0;
+        let first = IDLE_SLOT + 1;
+        let second = first + 1;
+        let high_priority = 2;
+        let owner_priority = 20;
+
+        scheduler.tasks[owner].state = State::Running;
+        scheduler.tasks[owner].base_priority = owner_priority;
+        scheduler.tasks[owner].priority = owner_priority;
+        for task in [first, second] {
+            scheduler.tasks[task].state = State::Blocked;
+            scheduler.tasks[task].base_priority = high_priority;
+            scheduler.tasks[task].priority = high_priority;
+            scheduler.tasks[task].waiting_mutex = core::ptr::addr_of!(mutex) as usize;
+        }
+
+        // SAFETY: this proof harness exclusively owns the local scheduler and mutex.
+        let state = unsafe { &mut *mutex.inner.get() };
+        state.owner = owner;
+        state.depth = 1;
+        enqueue_mutex_waiter(&mut scheduler, state, first);
+        enqueue_mutex_waiter(&mut scheduler, state, second);
+        scheduler.add_inheritance(owner, high_priority);
+        scheduler.add_inheritance(owner, high_priority);
+
+        release_mutex_locked(&mut scheduler, state, owner, 0);
+
+        assert_eq!(state.owner, first);
+        assert_eq!(state.wait_head, second);
+        assert_eq!(state.wait_tail, second);
+        assert_eq!(scheduler.tasks[owner].priority, owner_priority);
+        assert_eq!(
+            scheduler.tasks[first].inherited_waiters[high_priority as usize],
+            1
+        );
+    }
+
+    // RTOS-MUTEX-002: a proposed wait edge is rejected when it would close a
+    // bounded owner/waiter cycle, while an unrelated waiter remains admissible.
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn mutex_wait_chain_rejects_cycles() {
+        let outer = RtosMutex::new();
+        let inner = RtosMutex::new();
+        let mut scheduler = Sched::new();
+        let low = 0;
+        let mid = IDLE_SLOT + 1;
+        let unrelated = mid + 1;
+
+        // SAFETY: this proof harness exclusively owns both local mutexes.
+        unsafe {
+            (*outer.inner.get()).owner = low;
+            (*inner.inner.get()).owner = mid;
+        }
+        scheduler.tasks[mid].state = State::Blocked;
+        scheduler.tasks[mid].waiting_mutex = core::ptr::addr_of!(outer) as usize;
+
+        assert!(mutex_chain_contains(&scheduler, mid, low));
+        assert!(!mutex_chain_contains(&scheduler, mid, unrelated));
+    }
 }
 
 fn pop_mutex_waiter(sched: &mut Sched, state: &mut MutexState) -> usize {
@@ -671,7 +740,7 @@ fn pop_mutex_waiter(sched: &mut Sched, state: &mut MutexState) -> usize {
     task
 }
 
-fn mutex_chain_contains(sched: &Sched, mut owner: usize, sought: usize) -> bool {
+pub(super) fn mutex_chain_contains(sched: &Sched, mut owner: usize, sought: usize) -> bool {
     for _ in 0..TASK_SLOT_COUNT {
         if owner == sought {
             return true;
