@@ -319,6 +319,7 @@ fn init() {
         }
         idle.state = State::Ready;
         idle.stack = 0;
+        idle.stack_size = 0;
         idle.entry = Some(idle_entry);
         idle.arg = 0;
         idle.base_priority = (PRIORITY_LEVELS - 1) as u8;
@@ -393,6 +394,7 @@ fn spawn(
                 unsafe { initialize_irq_frame(top, tramp as usize, initial_tp, initial_fcsr) };
         }
         t.stack = stack as usize;
+        t.stack_size = size;
         t.entry = Some(entry);
         t.arg = arg as usize;
         t.wake_at = 0;

@@ -171,6 +171,11 @@ pub struct TaskDiagnostic {
     pub generation: u16,
     pub state: TaskState,
     pub entry: usize,
+    /// Bytes allocated for this task's stack.
+    ///
+    /// The adopted main task and scheduler-owned idle task report zero because
+    /// their stacks are not allocated through the dynamic task contract.
+    pub stack_size: usize,
     pub waiting_sem: usize,
     pub waiting_mutex: usize,
     pub wake_at: u64,

@@ -109,6 +109,10 @@ are non-zero and `capacity <= replenishment_period`.
 - **RTOS-OBS-005:** Hot-path accounting performs bounded in-memory updates only.
   It must not format output, invoke user callbacks, or perform UART/MMIO logging
   while holding the scheduler critical section.
+- **RTOS-OBS-006:** A task diagnostic reports the actual dynamic stack allocation
+  size selected after applying the runtime minimum. Adopted main and internal
+  idle stacks report zero because they are outside the dynamic allocator
+  contract. This is allocation evidence, not a stack high-water measurement.
 
 ## Waits And Priority Inheritance
 

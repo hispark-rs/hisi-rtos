@@ -434,6 +434,26 @@ fn task_metrics_account_dispatch_cpu_and_ready_latency() {
 }
 
 #[test]
+fn task_diagnostics_report_dynamic_stack_allocation_size() {
+    let mut scheduler = Sched::new();
+    scheduler.tasks[0].state = State::Running;
+    scheduler.tasks[0].stack_size = 0;
+    scheduler.tasks[2].state = State::Ready;
+    scheduler.tasks[2].stack = 0x1000;
+    scheduler.tasks[2].stack_size = 24 * 1024;
+
+    let mut snapshot = [TaskDiagnostic::default(); TASK_SLOT_COUNT];
+    scheduler.task_diagnostics(&mut snapshot, 0);
+
+    assert_eq!(snapshot[0].stack_size, 0);
+    assert_eq!(snapshot[2].stack_size, 24 * 1024);
+
+    scheduler.tasks[2] = Tcb::empty();
+    scheduler.task_diagnostics(&mut snapshot, 0);
+    assert_eq!(snapshot[2].stack_size, 0);
+}
+
+#[test]
 fn task_metrics_measure_outermost_scheduler_lock_interval() {
     let mut scheduler = Sched::new();
     scheduler.tasks[0].state = State::Running;

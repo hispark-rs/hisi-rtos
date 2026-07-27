@@ -112,6 +112,7 @@ pub(super) struct Tcb {
     pub(super) resume_generation: u32,
     pub(super) state: State,
     pub(super) stack: usize, // heap allocation addr to free on exit (0 for the main task)
+    pub(super) stack_size: usize,
     pub(super) entry: Option<TaskFn>,
     pub(super) arg: usize, // task argument (*mut c_void stored as usize so Tcb is Send)
     pub(super) next: usize, // intrusive link: ready queue OR one wait queue
@@ -139,6 +140,7 @@ impl Tcb {
             resume_generation: 0,
             state: State::Free,
             stack: 0,
+            stack_size: 0,
             entry: None,
             arg: 0,
             next: NIL,
@@ -282,6 +284,7 @@ impl Sched {
                     State::Throttled => TaskState::Throttled,
                 },
                 entry: task.entry.map_or(0, |entry| entry as usize),
+                stack_size: task.stack_size,
                 waiting_sem: task.waiting_sem,
                 waiting_mutex: task.waiting_mutex,
                 wake_at: task.wake_at,
