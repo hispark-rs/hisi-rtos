@@ -54,7 +54,8 @@ fn reservations_protect_promised_slots_from_ordinary_spawns() {
     );
 
     for expected_remaining in [1, 0] {
-        let slot = scheduler.alloc_reserved_dynamic_slot(&reservation).unwrap();
+        let (slot, stack) = scheduler.alloc_reserved_dynamic_slot(&reservation).unwrap();
+        assert_eq!(stack, None);
         scheduler.tasks[slot].state = State::Ready;
         assert_eq!(scheduler.diagnostics().dynamic_reserved, expected_remaining);
     }
@@ -75,7 +76,8 @@ fn releasing_a_reservation_returns_only_unconsumed_slots() {
     let old = scheduler
         .reserve_dynamic_slots(NonZeroUsize::new(3).unwrap())
         .unwrap();
-    let slot = scheduler.alloc_reserved_dynamic_slot(&old).unwrap();
+    let (slot, stack) = scheduler.alloc_reserved_dynamic_slot(&old).unwrap();
+    assert_eq!(stack, None);
     scheduler.tasks[slot].state = State::Ready;
     scheduler.release_task_reservation(&old).unwrap();
 
@@ -99,6 +101,80 @@ fn releasing_a_reservation_returns_only_unconsumed_slots() {
             available: 0,
         })
     );
+}
+
+#[test]
+fn task_resource_reservation_consumes_and_releases_preallocated_stacks() {
+    let mut scheduler = Sched::new();
+    let requirements = TaskResourceRequirements::new(
+        NonZeroUsize::new(3).unwrap(),
+        NonZeroUsize::new(24 * 1024).unwrap(),
+    )
+    .unwrap();
+    let mut stacks = [0usize; DYNAMIC_TASK_CAPACITY];
+    stacks[..3].copy_from_slice(&[0x1000, 0x2000, 0x3000]);
+    let reservation = scheduler
+        .reserve_dynamic_task_resources(requirements, stacks)
+        .unwrap();
+
+    assert_eq!(
+        scheduler.reservation_stack_size(&reservation),
+        Ok(Some(24 * 1024))
+    );
+    let (slot, first) = scheduler.alloc_reserved_dynamic_slot(&reservation).unwrap();
+    scheduler.tasks[slot].state = State::Ready;
+    assert_eq!(
+        first,
+        Some(reservation::ReservedStack {
+            pointer: 0x1000,
+            size: 24 * 1024,
+        })
+    );
+
+    let released = scheduler.release_task_reservation(&reservation).unwrap();
+    assert_eq!(released.count, 2);
+    assert_eq!(&released.stacks[..released.count], &[0x2000, 0x3000]);
+    assert_eq!(
+        scheduler.reservation_stack_size(&reservation),
+        Err(DriverError::InvalidHandle)
+    );
+}
+
+#[test]
+fn task_stack_preallocation_rolls_back_every_partial_allocation() {
+    let requirements = TaskResourceRequirements::new(
+        NonZeroUsize::new(3).unwrap(),
+        NonZeroUsize::new(24 * 1024).unwrap(),
+    )
+    .unwrap();
+    let mut allocated = 0usize;
+    let mut released = [0usize; 3];
+    let mut released_count = 0usize;
+    let result = driver::preallocate_task_stacks(
+        requirements,
+        |_| {
+            if allocated == 2 {
+                core::ptr::null_mut()
+            } else {
+                allocated += 1;
+                (allocated * 0x1000) as *mut u8
+            }
+        },
+        |pointer| {
+            released[released_count] = pointer as usize;
+            released_count += 1;
+        },
+    );
+
+    assert_eq!(
+        result,
+        Err(TaskAdmissionError::InsufficientTaskStackMemory {
+            required: 72 * 1024,
+            available: 48 * 1024,
+        })
+    );
+    assert_eq!(released_count, 2);
+    assert_eq!(&released[..released_count], &[0x1000, 0x2000]);
 }
 
 #[test]

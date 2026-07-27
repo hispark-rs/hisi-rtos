@@ -8,6 +8,10 @@ const RESERVATION_SLOT_MASK: u32 = (1 << RESERVATION_SLOT_BITS) - 1;
 struct ReservationEntry {
     generation: u16,
     remaining: u8,
+    next_stack: u8,
+    stack_count: u8,
+    stack_size: usize,
+    stacks: [usize; DYNAMIC_TASK_CAPACITY],
     active: bool,
 }
 
@@ -15,8 +19,24 @@ impl ReservationEntry {
     const EMPTY: Self = Self {
         generation: 0,
         remaining: 0,
+        next_stack: 0,
+        stack_count: 0,
+        stack_size: 0,
+        stacks: [0; DYNAMIC_TASK_CAPACITY],
         active: false,
     };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ReservedStack {
+    pub(super) pointer: usize,
+    pub(super) size: usize,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct ReleasedTaskResources {
+    pub(super) stacks: [usize; DYNAMIC_TASK_CAPACITY],
+    pub(super) count: usize,
 }
 
 pub(super) struct ReservationTable {
@@ -57,6 +77,10 @@ impl ReservationTable {
         let entry = &mut self.entries[slot];
         entry.generation = entry.generation.wrapping_add(1).max(1);
         entry.remaining = remaining;
+        entry.next_stack = 0;
+        entry.stack_count = 0;
+        entry.stack_size = 0;
+        entry.stacks = [0; DYNAMIC_TASK_CAPACITY];
         entry.active = true;
         self.total_remaining += required.get();
 
@@ -66,6 +90,32 @@ impl ReservationTable {
         // SAFETY: this table owns the active generation-bearing entry encoded
         // by `raw` until release invalidates it.
         Ok(unsafe { TaskReservation::from_raw(raw) })
+    }
+
+    pub(super) fn reserve_with_stacks(
+        &mut self,
+        required: TaskResourceRequirements,
+        available: usize,
+        stacks: [usize; DYNAMIC_TASK_CAPACITY],
+    ) -> Result<TaskReservation, TaskAdmissionError> {
+        let reservation = self.reserve(required.task_slots(), available)?;
+        let slot = self
+            .resolve_slot(&reservation)
+            .map_err(TaskAdmissionError::Runtime)?;
+        let entry = &mut self.entries[slot];
+        entry.stack_count = u8::try_from(required.task_slots().get())
+            .map_err(|_| TaskAdmissionError::Runtime(DriverError::ResourceExhausted))?;
+        entry.stack_size = required.stack_bytes_per_task().get();
+        entry.stacks = stacks;
+        Ok(reservation)
+    }
+
+    pub(super) fn stack_size(
+        &self,
+        reservation: &TaskReservation,
+    ) -> Result<Option<usize>, DriverError> {
+        let entry = self.resolve(reservation)?;
+        Ok((entry.stack_count != 0).then_some(entry.stack_size))
     }
 
     pub(super) fn ensure_consumable(
@@ -80,24 +130,58 @@ impl ReservationTable {
         }
     }
 
-    pub(super) fn consume(&mut self, reservation: &TaskReservation) -> Result<(), DriverError> {
+    pub(super) fn consume(
+        &mut self,
+        reservation: &TaskReservation,
+    ) -> Result<Option<ReservedStack>, DriverError> {
         let slot = self.resolve_slot(reservation)?;
         let entry = &mut self.entries[slot];
         if entry.remaining == 0 {
             return Err(DriverError::NoTaskSlots);
         }
+        let stack = if entry.stack_count == 0 {
+            None
+        } else {
+            let index = usize::from(entry.next_stack);
+            let pointer = entry.stacks[index];
+            debug_assert_ne!(pointer, 0);
+            entry.stacks[index] = 0;
+            entry.next_stack += 1;
+            Some(ReservedStack {
+                pointer,
+                size: entry.stack_size,
+            })
+        };
         entry.remaining -= 1;
         self.total_remaining -= 1;
-        Ok(())
+        Ok(stack)
     }
 
-    pub(super) fn release(&mut self, reservation: &TaskReservation) -> Result<(), DriverError> {
+    pub(super) fn release(
+        &mut self,
+        reservation: &TaskReservation,
+    ) -> Result<ReleasedTaskResources, DriverError> {
         let slot = self.resolve_slot(reservation)?;
         let entry = &mut self.entries[slot];
+        let mut released = ReleasedTaskResources {
+            stacks: [0; DYNAMIC_TASK_CAPACITY],
+            count: 0,
+        };
+        for pointer in &entry.stacks[usize::from(entry.next_stack)..usize::from(entry.stack_count)]
+        {
+            if *pointer != 0 {
+                released.stacks[released.count] = *pointer;
+                released.count += 1;
+            }
+        }
         self.total_remaining -= usize::from(entry.remaining);
         entry.remaining = 0;
+        entry.next_stack = 0;
+        entry.stack_count = 0;
+        entry.stack_size = 0;
+        entry.stacks = [0; DYNAMIC_TASK_CAPACITY];
         entry.active = false;
-        Ok(())
+        Ok(released)
     }
 
     fn resolve(&self, reservation: &TaskReservation) -> Result<&ReservationEntry, DriverError> {

@@ -19,6 +19,33 @@ fn mutex_from_handle(handle: MutexHandle) -> Result<&'static RtosMutex, DriverEr
     Ok(unsafe { &*(pointer.get() as *const RtosMutex) })
 }
 
+pub(super) fn preallocate_task_stacks(
+    required: TaskResourceRequirements,
+    mut allocate_stack: impl FnMut(usize) -> *mut u8,
+    mut release_stack: impl FnMut(*mut u8),
+) -> Result<[usize; DYNAMIC_TASK_CAPACITY], TaskAdmissionError> {
+    let mut stacks = [0usize; DYNAMIC_TASK_CAPACITY];
+    let stack_size = required.stack_bytes_per_task().get();
+    for (allocated, pointer) in stacks
+        .iter_mut()
+        .take(required.task_slots().get())
+        .enumerate()
+    {
+        let stack = allocate_stack(stack_size);
+        if stack.is_null() {
+            for stack in &stacks[..allocated] {
+                release_stack(*stack as *mut u8);
+            }
+            return Err(TaskAdmissionError::InsufficientTaskStackMemory {
+                required: required.total_stack_bytes(),
+                available: allocated * stack_size,
+            });
+        }
+        *pointer = stack as usize;
+    }
+    Ok(stacks)
+}
+
 pub(super) fn semaphore_state_has_waiters(state: &SemState) -> bool {
     state.wait_head != NIL || state.wait_tail != NIL
 }
@@ -29,7 +56,7 @@ pub(super) fn mutex_state_is_busy(state: &MutexState) -> bool {
 
 impl Runtime for HisiRuntime {
     fn contract(&self) -> RuntimeContract {
-        RuntimeContract::V1_3
+        RuntimeContract::V1_4
     }
 
     fn execution_profile(&self) -> RuntimeExecutionProfile {
@@ -54,12 +81,35 @@ impl Runtime for HisiRuntime {
         critical_section::with(|cs| SCHED.borrow_ref_mut(cs).reserve_dynamic_slots(required))
     }
 
+    fn reserve_task_resources(
+        &self,
+        required: TaskResourceRequirements,
+    ) -> Result<TaskReservation, TaskAdmissionError> {
+        let stacks = preallocate_task_stacks(required, allocate, deallocate)?;
+        let allocated = required.task_slots().get().min(DYNAMIC_TASK_CAPACITY);
+        let result = critical_section::with(|cs| {
+            SCHED
+                .borrow_ref_mut(cs)
+                .reserve_dynamic_task_resources(required, stacks)
+        });
+        if result.is_err() {
+            for stack in &stacks[..allocated] {
+                deallocate(*stack as *mut u8);
+            }
+        }
+        result
+    }
+
     fn release_task_reservation(&self, reservation: &TaskReservation) -> Result<(), DriverError> {
-        critical_section::with(|cs| {
+        let released = critical_section::with(|cs| {
             SCHED
                 .borrow_ref_mut(cs)
                 .release_task_reservation(reservation)
-        })
+        })?;
+        for stack in &released.stacks[..released.count] {
+            deallocate(*stack as *mut u8);
+        }
+        Ok(())
     }
 
     fn spawn(

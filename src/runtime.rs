@@ -22,12 +22,10 @@
 
 #[cfg(test)]
 use crate::BudgetSpec;
-#[cfg(test)]
-use crate::config::DYNAMIC_TASK_CAPACITY;
 use crate::config::{
-    ContractViolation, CooperativeConfig, CooperativeOnly, Diagnostics, Ported, PortedConfig,
-    Resources, RuntimeHandle, SchedulerPort, StartError, TASK_SLOT_COUNT, TaskDiagnostic,
-    TaskState,
+    ContractViolation, CooperativeConfig, CooperativeOnly, DYNAMIC_TASK_CAPACITY, Diagnostics,
+    Ported, PortedConfig, Resources, RuntimeHandle, SchedulerPort, StartError, TASK_SLOT_COUNT,
+    TaskDiagnostic, TaskState,
 };
 #[cfg(target_arch = "riscv32")]
 use crate::context::initialize_irq_frame;
@@ -68,7 +66,7 @@ use embassy_time_queue_utils::Queue as EmbassyTimeQueue;
 use hisi_rf_rtos_driver::{
     Error as DriverError, MutexHandle, Runtime, RuntimeContract, RuntimeExecutionProfile,
     SemaphoreHandle, TaskAdmissionError, TaskCapacity, TaskConfig, TaskPriority, TaskReservation,
-    WaitCancellationOutcome, WaitOutcome, WaitTimeout,
+    TaskResourceRequirements, WaitCancellationOutcome, WaitOutcome, WaitTimeout,
 };
 
 /// Contract-v1 priority levels: 0 is highest, 31 is lowest.
@@ -344,15 +342,29 @@ fn spawn(
 ) -> Result<usize, DriverError> {
     init();
     reclaim_retired_stacks();
-    let size = stack_size.max(start_state().config.minimum_stack_size.get());
-    let stack = allocate(size);
-    if stack.is_null() {
+    let minimum_size = stack_size.max(start_state().config.minimum_stack_size.get());
+    let reserved_stack_size = match reservation {
+        Some(reservation) => {
+            critical_section::with(|cs| SCHED.borrow_ref(cs).reservation_stack_size(reservation))?
+        }
+        None => None,
+    };
+    let size = reserved_stack_size.unwrap_or(minimum_size);
+    if minimum_size > size {
         return Err(DriverError::ResourceExhausted);
     }
+    let allocated_stack = if reserved_stack_size.is_none() {
+        let stack = allocate(size);
+        if stack.is_null() {
+            return Err(DriverError::ResourceExhausted);
+        }
+        stack
+    } else {
+        core::ptr::null_mut()
+    };
     #[cfg(target_arch = "riscv32")]
     let trap_scheduling = start_state().port.is_some();
     // 16-byte aligned stack top.
-    let top = (stack as usize + size) & !0xf;
     #[cfg(target_arch = "riscv32")]
     let (initial_tp, initial_fcsr): (usize, u32) = unsafe {
         let (tp, fcsr);
@@ -368,10 +380,15 @@ fn spawn(
     let now = now_ms();
     let slot = critical_section::with(|cs| -> Result<usize, DriverError> {
         let s = &mut *SCHED.borrow_ref_mut(cs);
-        let i = match reservation {
+        let (i, reserved_stack) = match reservation {
             Some(reservation) => s.alloc_reserved_dynamic_slot(reservation)?,
-            None => s.alloc_dynamic_slot()?,
+            None => (s.alloc_dynamic_slot()?, None),
         };
+        let stack = reserved_stack
+            .map(|stack| stack.pointer as *mut u8)
+            .unwrap_or(allocated_stack);
+        debug_assert!(!stack.is_null());
+        let top = (stack as usize + size) & !0xf;
         s.slot_generations[i] = s.slot_generations[i].wrapping_add(1).max(1);
         let identity_generation = s.slot_generations[i];
         let t = &mut s.tasks[i];
@@ -407,7 +424,9 @@ fn spawn(
         Ok(i)
     });
     if slot.is_err() {
-        deallocate(stack);
+        if !allocated_stack.is_null() {
+            deallocate(allocated_stack);
+        }
     } else {
         rearm_timer();
     }

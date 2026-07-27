@@ -114,6 +114,19 @@ are non-zero and `capacity <= replenishment_period`.
   idle stacks report zero because they are outside the dynamic allocator
   contract. This is allocation evidence, not a stack high-water measurement.
 
+## Task Resource Admission
+
+- **RTOS-ADMISSION-001:** A v1.4 owner-bound task-resource reservation atomically
+  promises both dynamic scheduler slots and one fixed-size stack allocation per
+  promised task. All stack allocations happen outside the scheduler critical
+  section. If any allocation or slot reservation fails, every allocation made
+  by that request is released and no live reservation is published.
+- **RTOS-ADMISSION-002:** A reserved spawn consumes exactly one promised slot and
+  at most one promised stack. A task requesting more bytes than the reserved
+  per-task stack size fails before consuming either resource. Releasing a live
+  reservation frees only unconsumed stacks and slots; stacks already transferred
+  to tasks follow the normal task-exit reclamation path.
+
 ## Waits And Priority Inheritance
 
 - **RTOS-WAIT-001:** Signal, timeout, interrupt wake, and cancellation compete at

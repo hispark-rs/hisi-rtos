@@ -156,6 +156,16 @@ implementation = ["src/runtime.rs:spawn", "src/runtime/scheduler.rs:Tcb::stack_s
 host_tests = ["tests::task_diagnostics_report_dynamic_stack_allocation_size"]
 
 [[requirement]]
+id = "RTOS-ADMISSION-001"
+implementation = ["src/runtime/driver.rs:HisiRuntime::reserve_task_resources", "src/runtime/reservation.rs:ReservationTable::reserve_with_stacks"]
+host_tests = ["tests::task_resource_reservation_consumes_and_releases_preallocated_stacks"]
+
+[[requirement]]
+id = "RTOS-ADMISSION-002"
+implementation = ["src/runtime.rs:spawn", "src/runtime/reservation.rs:ReservationTable::consume", "src/runtime/reservation.rs:ReservationTable::release"]
+host_tests = ["tests::task_resource_reservation_consumes_and_releases_preallocated_stacks"]
+
+[[requirement]]
 id = "RTOS-WAIT-001"
 implementation = ["src/runtime/scheduler.rs:Sched::wake_sleepers", "src/runtime/sync.rs:Semaphore::down_timeout", "src/runtime/sync.rs:cancel_wait_locked"]
 host_tests = ["tests::timed_semaphore_wait_wakes_only_after_its_deadline", "tests::forever_semaphore_wait_is_not_treated_as_an_expired_deadline", "tests::cancelling_queued_semaphore_wait_makes_task_ready_without_minting_a_count", "tests::cancelling_mutex_wait_restores_owner_priority"]
