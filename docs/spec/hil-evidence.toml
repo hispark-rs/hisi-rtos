@@ -1,0 +1,61 @@
+schema = 1
+
+[[evidence]]
+marker = "A3_RTOS_PREEMPTION_OK"
+target = "WS63"
+date = "2026-07-17"
+result = "pass"
+successful_runs = 20
+reset_mode = "J-Link nRST without reflashing"
+parent_commit = "e460bbb17d21bbc17e0111548db40fac775ef44f"
+evidence_url = "https://github.com/hispark-rs/hisi-riscv-rs/blob/e460bbb17d21bbc17e0111548db40fac775ef44f/docs/plan/evidence/ws63-rf-a3-unified-context-2026-07-14.md"
+
+[[evidence]]
+marker = "A3_RTOS_BUDGET_OK"
+target = "WS63"
+date = "2026-07-14"
+result = "pass"
+successful_runs = 1
+reset_mode = "J-Link nRST after verified download"
+parent_commit = "013500573641fa2b3068b7e712a53b94d790d783"
+evidence_url = "https://github.com/hispark-rs/hisi-riscv-rs/blob/013500573641fa2b3068b7e712a53b94d790d783/docs/plan/evidence/ws63-rf-a3-task-capacity-2026-07-14.md"
+
+[[evidence]]
+marker = "A3_SCHEDULER_STRESS_OK"
+target = "WS63"
+date = "2026-07-28"
+result = "pass"
+successful_runs = 20
+reset_mode = "J-Link nRST without reflashing"
+parent_commit = "4d355dc89d8d3ec1478eb6252d93ec92a5a5954d"
+evidence_url = "https://github.com/hispark-rs/hisi-riscv-rs/blob/4d355dc89d8d3ec1478eb6252d93ec92a5a5954d/docs/plan/evidence/ws63-rtos-a5r-resource-lifecycle-2026-07-28.md"
+
+[[evidence]]
+marker = "A3_PRIORITY_INHERITANCE_OK"
+target = "WS63"
+date = "2026-07-14"
+result = "pass"
+successful_runs = 3
+reset_mode = "J-Link nRST after verified download"
+parent_commit = "0144ebc6d26a6e50c8370674f04ea771ffd94187"
+evidence_url = "https://github.com/hispark-rs/hisi-riscv-rs/blob/0144ebc6d26a6e50c8370674f04ea771ffd94187/docs/plan/evidence/ws63-rf-a3-priority-inheritance-2026-07-14.md"
+
+[[evidence]]
+marker = "A3_RTOS_EMBASSY_COEXIST_OK"
+target = "WS63"
+date = "2026-07-14"
+result = "pass"
+successful_runs = 3
+reset_mode = "J-Link nRST after verified download"
+parent_commit = "ec6eb369afd8b2725101faa0dc6493bf739c9ff5"
+evidence_url = "https://github.com/hispark-rs/hisi-riscv-rs/blob/ec6eb369afd8b2725101faa0dc6493bf739c9ff5/docs/plan/evidence/ws63-rf-a3-embassy-coexistence-2026-07-14.md"
+
+[[evidence]]
+marker = "A5R_RESOURCE_LIFECYCLE_OK"
+target = "WS63"
+date = "2026-07-28"
+result = "pass"
+successful_runs = 20
+reset_mode = "J-Link nRST without reflashing"
+parent_commit = "4d355dc89d8d3ec1478eb6252d93ec92a5a5954d"
+evidence_url = "https://github.com/hispark-rs/hisi-riscv-rs/blob/4d355dc89d8d3ec1478eb6252d93ec92a5a5954d/docs/plan/evidence/ws63-rtos-a5r-resource-lifecycle-2026-07-28.md"

@@ -16,9 +16,12 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "docs/spec/requirements.toml"
+HIL_EVIDENCE_MANIFEST = ROOT / "docs/spec/hil-evidence.toml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 EVIDENCE_KEYS = ("host_tests", "kani", "tla", "hil")
 HIL_MARKER = re.compile(r"^(?:A3|A5R)_[A-Z0-9_]+$")
+COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+EVIDENCE_DATE = re.compile(r"^20[0-9]{2}-[0-9]{2}-[0-9]{2}$")
 
 
 def fail(message: str) -> None:
@@ -85,6 +88,56 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def load_hil_evidence() -> dict[str, dict[str, object]]:
+    manifest = tomllib.loads(HIL_EVIDENCE_MANIFEST.read_text())
+    if manifest.get("schema") != 1:
+        fail("hil-evidence.toml must use schema 1")
+    entries = manifest.get("evidence", [])
+    if not isinstance(entries, list):
+        fail("hil-evidence.toml evidence entries are not an array")
+
+    evidence_by_marker: dict[str, dict[str, object]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            fail("hil-evidence.toml contains a non-table evidence entry")
+        marker = entry.get("marker")
+        if not isinstance(marker, str) or HIL_MARKER.fullmatch(marker) is None:
+            fail(f"invalid HIL evidence marker {marker!r}")
+        if marker in evidence_by_marker:
+            fail(f"duplicate HIL evidence marker {marker}")
+        target = entry.get("target")
+        if not isinstance(target, str) or not target:
+            fail(f"{marker} has no target")
+        date = entry.get("date")
+        if not isinstance(date, str) or EVIDENCE_DATE.fullmatch(date) is None:
+            fail(f"{marker} has invalid evidence date {date!r}")
+        if entry.get("result") != "pass":
+            fail(f"{marker} evidence result must be pass")
+        successful_runs = entry.get("successful_runs")
+        if not isinstance(successful_runs, int) or successful_runs < 1:
+            fail(f"{marker} successful_runs must be a positive integer")
+        reset_mode = entry.get("reset_mode")
+        if not isinstance(reset_mode, str) or not reset_mode:
+            fail(f"{marker} has no reset_mode")
+        parent_commit = entry.get("parent_commit")
+        if (
+            not isinstance(parent_commit, str)
+            or COMMIT_SHA.fullmatch(parent_commit) is None
+        ):
+            fail(f"{marker} has invalid parent_commit {parent_commit!r}")
+        evidence_url = entry.get("evidence_url")
+        expected_prefix = (
+            "https://github.com/hispark-rs/hisi-riscv-rs/blob/"
+            f"{parent_commit}/"
+        )
+        if not isinstance(evidence_url, str) or not evidence_url.startswith(
+            expected_prefix
+        ):
+            fail(f"{marker} evidence_url must use its immutable parent commit")
+        evidence_by_marker[marker] = entry
+    return evidence_by_marker
+
+
 def main() -> None:
     args = parse_args()
     manifest = tomllib.loads(MANIFEST.read_text())
@@ -120,6 +173,8 @@ def main() -> None:
     tla_hash_match = re.search(r'echo "([0-9a-f]{64})\s+/tmp/tla2tools\.jar"', workflow)
     if tla_version_match is None or tla_hash_match is None:
         fail("CI must pin the TLA+ release and SHA-256")
+    hil_evidence = load_hil_evidence()
+    referenced_hil_markers: set[str] = set()
     inventory = []
     for entry in requirements:
         requirement_id = entry["id"]
@@ -160,6 +215,9 @@ def main() -> None:
         for marker in hil:
             if not isinstance(marker, str) or HIL_MARKER.fullmatch(marker) is None:
                 fail(f"{requirement_id} has invalid HIL marker {marker!r}")
+            if marker not in hil_evidence:
+                fail(f"{requirement_id} has no immutable HIL evidence for {marker}")
+            referenced_hil_markers.add(marker)
 
         inventory.append(
             {
@@ -175,7 +233,16 @@ def main() -> None:
                     kani_value if kani_value.startswith("NotApplicable:") else None
                 ),
                 "hil": hil,
+                "hil_evidence": [hil_evidence[marker] for marker in hil],
             }
+        )
+
+    missing_hil_evidence = sorted(referenced_hil_markers - hil_evidence.keys())
+    extra_hil_evidence = sorted(hil_evidence.keys() - referenced_hil_markers)
+    if missing_hil_evidence or extra_hil_evidence:
+        fail(
+            "HIL evidence drift: "
+            f"missing={missing_hil_evidence}, extra={extra_hil_evidence}"
         )
 
     report = {
@@ -211,6 +278,8 @@ def main() -> None:
                 item["status"] == "software-evidence" for item in inventory
             ),
             "hil_required": sum(item["status"] == "hil-required" for item in inventory),
+            "hil_markers": len(referenced_hil_markers),
+            "hil_markers_with_evidence": len(hil_evidence),
         },
     }
     if args.report is not None:
@@ -221,7 +290,8 @@ def main() -> None:
 
     print(
         f"requirements: {len(inventory)} IDs aligned with {normative_spec}; "
-        f"{report['summary']['hil_required']} require HIL"
+        f"{report['summary']['hil_required']} require HIL; "
+        f"{len(hil_evidence)} immutable marker records"
     )
 
 
