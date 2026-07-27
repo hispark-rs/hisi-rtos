@@ -87,7 +87,7 @@ impl Semaphore {
     /// is no re-check loop (the only thing that unblocks a waiter is `up`).
     ///
     /// [`up`]: Semaphore::up
-    fn down(&self) -> Result<(), DriverError> {
+    fn down(&self) -> Result<bool, DriverError> {
         let switch_delivery_available = ensure_switch_delivery().is_ok();
         let block = critical_section::with(|cs| -> Result<_, DriverError> {
             let s = &mut *SCHED.borrow_ref_mut(cs);
@@ -111,16 +111,18 @@ impl Semaphore {
             }
         })?;
         if block {
-            // Parked on this sem's wait queue; `up` will move us back to Ready
-            // (== the grant). When we resume here, we already hold the count.
+            // Parked on this sem's wait queue; `up` will move us back to Ready.
+            // Cancellation may revoke that direct grant before this task resumes,
+            // so return the recorded grant state instead of assuming success.
             switch_away(current_id());
-            critical_section::with(|cs| {
+            Ok(critical_section::with(|cs| {
                 let s = &mut *SCHED.borrow_ref_mut(cs);
                 let current = s.current;
-                consume_semaphore_grant_locked(s, current);
-            });
+                consume_semaphore_grant_locked(s, current)
+            }))
+        } else {
+            Ok(true)
         }
-        Ok(())
     }
 
     /// Acquire with a timeout (ms). Returns `true` if a count was obtained,
@@ -132,8 +134,7 @@ impl Semaphore {
     /// if the mask-ROM systick deadline wins first.
     pub(super) fn down_timeout(&self, timeout_ms: u32) -> Result<bool, DriverError> {
         if timeout_ms == u32::MAX {
-            self.down()?;
-            return Ok(true);
+            return self.down();
         }
         let switch_delivery_available = ensure_switch_delivery().is_ok();
         let deadline = now_ms().saturating_add(timeout_ms as u64);

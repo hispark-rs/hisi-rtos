@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "docs/spec/requirements.toml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 EVIDENCE_KEYS = ("host_tests", "kani", "tla", "hil")
-HIL_MARKER = re.compile(r"^A3_[A-Z0-9_]+$")
+HIL_MARKER = re.compile(r"^(?:A3|A5R)_[A-Z0-9_]+$")
 
 
 def fail(message: str) -> None:
