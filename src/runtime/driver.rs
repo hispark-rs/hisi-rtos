@@ -162,10 +162,7 @@ impl Runtime for HisiRuntime {
     }
 
     fn current_task(&self) -> Result<TaskId, DriverError> {
-        let slot = current_id();
-        let generation =
-            critical_section::with(|cs| SCHED.borrow_ref(cs).tasks[slot].identity_generation);
-        encode_task_id(slot, generation)
+        current_task_handle()
     }
 
     fn set_task_priority(&self, task: TaskId, priority: TaskPriority) -> Result<(), DriverError> {

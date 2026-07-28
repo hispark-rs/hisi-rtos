@@ -697,6 +697,13 @@ pub fn task_diagnostics(output: &mut [TaskDiagnostic]) -> usize {
     critical_section::with(|cs| SCHED.borrow_ref(cs).task_diagnostics(output, now))
 }
 
+fn current_task_handle() -> Result<TaskId, DriverError> {
+    let slot = current_id();
+    let generation =
+        critical_section::with(|cs| SCHED.borrow_ref(cs).tasks[slot].identity_generation);
+    encode_task_id(slot, generation)
+}
+
 fn set_task_run_policy_inner(task: TaskId, policy: RunPolicy) -> Result<(), DriverError> {
     let (slot, generation) = decode_task_id(task)?;
     let now = now_ms();
@@ -712,6 +719,17 @@ fn set_task_run_policy_inner(task: TaskId, policy: RunPolicy) -> Result<(), Driv
     })?;
     rearm_timer();
     Ok(())
+}
+
+impl<Mode> RuntimeHandle<Mode> {
+    /// Returns the generation-bearing identity of the calling RTOS thread.
+    ///
+    /// Applications can retain this handle for diagnostics. Only a ported
+    /// runtime handle exposes policy mutation, so observing the current task
+    /// does not widen the cooperative-only capability.
+    pub fn current_task(&self) -> Result<TaskId, DriverError> {
+        current_task_handle()
+    }
 }
 
 impl RuntimeHandle<Ported> {

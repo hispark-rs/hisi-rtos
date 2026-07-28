@@ -3,6 +3,7 @@ use core::num::NonZeroU32;
 use hisi_rtos::{CooperativeOnly, RunPolicy, RuntimeHandle, TaskId};
 
 fn set_preemptive_policy(handle: &RuntimeHandle<CooperativeOnly>, task: TaskId) {
+    let _ = handle.current_task();
     let _ = handle.set_task_run_policy(
         task,
         RunPolicy::Preemptive {
