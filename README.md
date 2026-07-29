@@ -50,10 +50,10 @@ hisi_rtos::bind_interrupts!(struct RtosIrqs {
 
 static STORAGE: hisi_rtos::SchedulerStorage<15> =
     hisi_rtos::SchedulerStorage::new();
-static STACKS: hisi_rtos::SchedulerStackArena<{ 7 * 24 * 1024 + 512 }> =
-    hisi_rtos::SchedulerStackArena::new();
+static SCHEDULER_ARENA: hisi_rtos::SchedulerArena<{ 7 * 24 * 1024 + 16 * 1024 + 512 }> =
+    hisi_rtos::SchedulerArena::new();
 
-let storage = STORAGE.install(&STACKS)?;
+let storage = STORAGE.install(&SCHEDULER_ARENA)?;
 let runtime = hisi_rtos::ws63::start(
     hisi_rtos::ws63::Config::default(),
     hisi_rtos::ws63::Resources {

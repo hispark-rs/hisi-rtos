@@ -23,4 +23,6 @@ pub use config::*;
 pub use hisi_rf_rtos_driver::TaskId;
 pub use runtime::*;
 pub use scheduling::{BudgetSpec, RunPolicy};
-pub use storage::{InstalledSchedulerStorage, SchedulerStackArena, SchedulerStorage, StorageError};
+#[allow(deprecated)]
+pub use storage::SchedulerStackArena;
+pub use storage::{InstalledSchedulerStorage, SchedulerArena, SchedulerStorage, StorageError};

@@ -1,4 +1,4 @@
-//! Caller-owned storage for dynamically created task stacks.
+//! Caller-owned storage for dynamic scheduler allocations.
 
 use core::cell::Cell;
 use core::cell::UnsafeCell;
@@ -26,18 +26,23 @@ pub enum StorageError {
     },
 }
 
-/// Statically placed bytes used exclusively for dynamic task stacks.
+/// Statically placed bytes used for dynamic scheduler allocations.
+///
+/// This arena backs task stacks and the runtime-owned synchronization objects
+/// exposed through `hisi-rf-rtos-driver`. Its capacity therefore includes the
+/// profile's stack payload, allocator metadata, and an explicit object
+/// headroom budget.
 #[repr(C, align(16))]
-pub struct SchedulerStackArena<const BYTES: usize> {
+pub struct SchedulerArena<const BYTES: usize> {
     bytes: UnsafeCell<[MaybeUninit<u8>; BYTES]>,
 }
 
 // SAFETY: the bytes are reachable only through one-shot SchedulerStorage
 // installation, which transfers exclusive process-lifetime ownership to CHeap.
-unsafe impl<const BYTES: usize> Sync for SchedulerStackArena<BYTES> {}
+unsafe impl<const BYTES: usize> Sync for SchedulerArena<BYTES> {}
 
-impl<const BYTES: usize> SchedulerStackArena<BYTES> {
-    /// Construct an unclaimed stack arena.
+impl<const BYTES: usize> SchedulerArena<BYTES> {
+    /// Construct an unclaimed scheduler arena.
     pub const fn new() -> Self {
         Self {
             bytes: UnsafeCell::new([MaybeUninit::uninit(); BYTES]),
@@ -45,18 +50,24 @@ impl<const BYTES: usize> SchedulerStackArena<BYTES> {
     }
 }
 
-impl<const BYTES: usize> Default for SchedulerStackArena<BYTES> {
+impl<const BYTES: usize> Default for SchedulerArena<BYTES> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Caller-owned task-stack storage for at most `N` dynamic tasks.
+/// Migration alias for [`SchedulerArena`].
+#[deprecated(
+    since = "0.1.0-alpha.17",
+    note = "use SchedulerArena; the storage also backs runtime synchronization objects"
+)]
+pub type SchedulerStackArena<const BYTES: usize> = SchedulerArena<BYTES>;
+
+/// Caller-owned scheduler storage for at most `N` dynamic tasks.
 ///
-/// `N` controls the scheduler's dynamic task quota. Stack bytes are supplied
-/// separately to [`Self::install`], so variable vendor stack requests remain
-/// supported and the application can place the arena in an appropriate memory
-/// region.
+/// `N` controls the scheduler's dynamic task quota. Allocation bytes are
+/// supplied separately to [`Self::install`], so profile-specific task stacks
+/// and synchronization objects remain visible in the application memory map.
 pub struct SchedulerStorage<const N: usize> {
     heap: CHeap,
     installed: Mutex<Cell<bool>>,
@@ -78,7 +89,7 @@ impl<const N: usize> SchedulerStorage<N> {
     /// returned capability and the RTOS.
     pub fn install<const BYTES: usize>(
         &'static self,
-        arena: &'static SchedulerStackArena<BYTES>,
+        arena: &'static SchedulerArena<BYTES>,
     ) -> Result<InstalledSchedulerStorage<N>, StorageError> {
         if N == 0 || N > DYNAMIC_TASK_CAPACITY {
             return Err(StorageError::UnsupportedCapacity {
@@ -199,13 +210,13 @@ mod tests {
     #[test]
     fn caller_owned_arena_is_installed_once_and_reports_usage() {
         let storage = Box::leak(Box::new(SchedulerStorage::<3>::new()));
-        let arena = Box::leak(Box::new(SchedulerStackArena::<4096>::new()));
+        let arena = Box::leak(Box::new(SchedulerArena::<4096>::new()));
         let installed = storage.install(arena).unwrap();
 
         assert_eq!(installed.dynamic_capacity(), 3);
         assert!(installed.metrics().initialized);
         assert!(matches!(
-            storage.install(Box::leak(Box::new(SchedulerStackArena::<4096>::new()))),
+            storage.install(Box::leak(Box::new(SchedulerArena::<4096>::new()))),
             Err(StorageError::AlreadyInstalled)
         ));
     }
@@ -213,7 +224,7 @@ mod tests {
     #[test]
     fn unsupported_capacity_fails_before_claiming_the_arena() {
         let storage = Box::leak(Box::new(SchedulerStorage::<0>::new()));
-        let arena = Box::leak(Box::new(SchedulerStackArena::<4096>::new()));
+        let arena = Box::leak(Box::new(SchedulerArena::<4096>::new()));
         assert!(matches!(
             storage.install(arena),
             Err(StorageError::UnsupportedCapacity {
