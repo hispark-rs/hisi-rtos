@@ -36,6 +36,40 @@ slice and Embassy deadlines share the same `SchedulerPort` timer; HAL must not
 install a second time driver in the same firmware. Peripheral async traits stay
 in `hisi-hal`.
 
+## WS63 startup
+
+Enable `chip-ws63` to let the RTOS own the WS63 scheduler timer and deferred
+software interrupt. The application still owns task-stack allocation until the
+planned caller-owned `SchedulerStorage<N>` API lands:
+
+```rust,ignore
+hisi_rtos::bind_interrupts!(struct RtosIrqs {
+    TIMER_INT0 => hisi_rtos::ws63::TimerInterrupt;
+    SOFT_INT0 => hisi_rtos::ws63::SoftwareInterrupt;
+});
+
+let runtime = hisi_rtos::ws63::start(
+    hisi_rtos::ws63::Config::default(),
+    hisi_rtos::ws63::Resources {
+        timer: peripherals.TIMER,
+        software_interrupt: peripherals.SYS_CTL1,
+        allocator: hisi_rtos::ws63::Allocator {
+            allocate: allocate_task_stack,
+            deallocate: deallocate_task_stack,
+        },
+        contract_violation,
+        irqs: RtosIrqs::new(),
+    },
+)?;
+```
+
+This is the normal WS63 target path. It consumes both peripheral singletons,
+installs TIMER_INT0 and SOFT_INT0, supplies the 24 MHz monotonic clock, enables
+global interrupts after scheduler installation, and routes Cooperative,
+Budgeted, and Preemptive switching through the shared trap-frame/`mret` path.
+The lower-level `start_with_port` API remains available for new chip ports and
+conformance fixtures.
+
 Vendor LiteOS is a behavior and disassembly oracle for the WS63 blob ABI, not a
 backend or dependency of this crate. `hisi-rtos` is the sole maintained native
 runtime; the WS63 compatibility adapter maps only the symbols actually required

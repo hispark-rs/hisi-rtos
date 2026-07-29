@@ -15,6 +15,8 @@ mod config;
 mod context;
 mod runtime;
 mod scheduling;
+#[cfg(feature = "chip-ws63")]
+pub mod ws63;
 
 pub use config::*;
 pub use hisi_rf_rtos_driver::TaskId;

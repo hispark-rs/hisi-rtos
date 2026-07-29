@@ -26,6 +26,10 @@ jobs:
       - run: cargo test --locked --target x86_64-unknown-linux-gnu
       - run: cargo clippy -Zbuild-std=core --target riscv32imfc-unknown-none-elf -- -D warnings
       - run: cargo build -Zbuild-std=core --target riscv32imfc-unknown-none-elf
+      - name: Check WS63 scheduler port
+        run: cargo clippy --locked -Zbuild-std=core --target riscv32imfc-unknown-none-elf --features chip-ws63 -- -D warnings
+      - name: Check WS63 scheduler port with Embassy time
+        run: cargo build --locked -Zbuild-std=core --target riscv32imfc-unknown-none-elf --features chip-ws63,embassy
 
   kani:
     runs-on: ubuntu-latest
