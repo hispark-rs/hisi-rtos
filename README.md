@@ -1,8 +1,8 @@
 # hisi-rtos
 
 `no_std` scheduler and runtime services for HiSilicon embedded Rust firmware.
-Applications inject allocation and monotonic-time resources, then start exactly
-one runtime before initializing radio firmware.
+Applications install caller-owned task-stack storage and start exactly one
+runtime before initializing radio firmware.
 
 The crate maintains one single-hart scheduler backend. Each thread chooses
 `RunPolicy::Cooperative`, `RunPolicy::Budgeted`, or `RunPolicy::Preemptive`.
@@ -39,8 +39,8 @@ in `hisi-hal`.
 ## WS63 startup
 
 Enable `chip-ws63` to let the RTOS own the WS63 scheduler timer and deferred
-software interrupt. The application still owns task-stack allocation until the
-planned caller-owned `SchedulerStorage<N>` API lands:
+software interrupt. The application declares both the dynamic task quota and
+the stack arena; no allocator callback is part of the WS63 happy path:
 
 ```rust,ignore
 hisi_rtos::bind_interrupts!(struct RtosIrqs {
@@ -48,15 +48,18 @@ hisi_rtos::bind_interrupts!(struct RtosIrqs {
     SOFT_INT0 => hisi_rtos::ws63::SoftwareInterrupt;
 });
 
+static STORAGE: hisi_rtos::SchedulerStorage<15> =
+    hisi_rtos::SchedulerStorage::new();
+static STACKS: hisi_rtos::SchedulerStackArena<{ 7 * 24 * 1024 + 512 }> =
+    hisi_rtos::SchedulerStackArena::new();
+
+let storage = STORAGE.install(&STACKS)?;
 let runtime = hisi_rtos::ws63::start(
     hisi_rtos::ws63::Config::default(),
     hisi_rtos::ws63::Resources {
         timer: peripherals.TIMER,
         software_interrupt: peripherals.SYS_CTL1,
-        allocator: hisi_rtos::ws63::Allocator {
-            allocate: allocate_task_stack,
-            deallocate: deallocate_task_stack,
-        },
+        storage,
         contract_violation,
         irqs: RtosIrqs::new(),
     },

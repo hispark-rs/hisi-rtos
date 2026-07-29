@@ -24,6 +24,13 @@ pub struct Resources {
     pub monotonic_ms: fn() -> u64,
 }
 
+/// Platform services used with caller-owned [`crate::SchedulerStorage`].
+#[derive(Clone, Copy)]
+pub struct RuntimeResources {
+    /// Returns a wrapping monotonic millisecond counter.
+    pub monotonic_ms: fn() -> u64,
+}
+
 /// Target timer and deferred-reschedule operations injected by the application.
 ///
 /// The callbacks must not call user code. `arm_timer` receives a non-zero

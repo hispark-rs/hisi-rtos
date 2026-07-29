@@ -216,8 +216,14 @@ impl Sched {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn diagnostics(&self) -> Diagnostics {
+        self.diagnostics_with_capacity(DYNAMIC_TASK_CAPACITY)
+    }
+
+    pub(super) fn diagnostics_with_capacity(&self, dynamic_capacity: usize) -> Diagnostics {
         let mut snapshot = self.diagnostics;
+        snapshot.dynamic_capacity = dynamic_capacity as u8;
         snapshot.current_task = self.current;
         snapshot.current_lock_depth = self.tasks[self.current].scheduler_lock_depth;
         for task in &self.tasks {
@@ -233,7 +239,7 @@ impl Sched {
                 State::Free | State::Running => {}
             }
         }
-        snapshot.dynamic_used = self.tasks[(IDLE_SLOT + 1)..]
+        snapshot.dynamic_used = self.tasks[(IDLE_SLOT + 1)..dynamic_slot_end(dynamic_capacity)]
             .iter()
             .filter(|task| task.state != State::Free)
             .count() as u8;
@@ -895,24 +901,42 @@ impl Sched {
         self.tasks[next].metrics.on_dispatch(now);
         self.time_slice_deadline = 0;
     }
+    #[cfg(test)]
     pub(super) fn alloc_dynamic_slot(&mut self) -> Result<usize, DriverError> {
-        let free = self.tasks[(IDLE_SLOT + 1)..]
+        self.alloc_dynamic_slot_with_capacity(DYNAMIC_TASK_CAPACITY)
+    }
+
+    pub(super) fn alloc_dynamic_slot_with_capacity(
+        &mut self,
+        dynamic_capacity: usize,
+    ) -> Result<usize, DriverError> {
+        let end = dynamic_slot_end(dynamic_capacity);
+        let free = self.tasks[(IDLE_SLOT + 1)..end]
             .iter()
             .filter(|task| task.state == State::Free)
             .count();
         if free <= self.reservations.total_remaining() {
             return Err(DriverError::NoTaskSlots);
         }
-        ((IDLE_SLOT + 1)..TASK_SLOT_COUNT)
+        ((IDLE_SLOT + 1)..end)
             .find(|&i| self.tasks[i].state == State::Free)
             .ok_or(DriverError::NoTaskSlots)
     }
 
+    #[cfg(test)]
     pub(super) fn reserve_dynamic_slots(
         &mut self,
         required: NonZeroUsize,
     ) -> Result<TaskReservation, TaskAdmissionError> {
-        let available = self.tasks[(IDLE_SLOT + 1)..]
+        self.reserve_dynamic_slots_with_capacity(required, DYNAMIC_TASK_CAPACITY)
+    }
+
+    pub(super) fn reserve_dynamic_slots_with_capacity(
+        &mut self,
+        required: NonZeroUsize,
+        dynamic_capacity: usize,
+    ) -> Result<TaskReservation, TaskAdmissionError> {
+        let available = self.tasks[(IDLE_SLOT + 1)..dynamic_slot_end(dynamic_capacity)]
             .iter()
             .filter(|task| task.state == State::Free)
             .count()
@@ -920,12 +944,22 @@ impl Sched {
         self.reservations.reserve(required, available)
     }
 
+    #[cfg(test)]
     pub(super) fn reserve_dynamic_task_resources(
         &mut self,
         required: TaskResourceRequirements,
         stacks: [usize; DYNAMIC_TASK_CAPACITY],
     ) -> Result<TaskReservation, TaskAdmissionError> {
-        let available = self.tasks[(IDLE_SLOT + 1)..]
+        self.reserve_dynamic_task_resources_with_capacity(required, stacks, DYNAMIC_TASK_CAPACITY)
+    }
+
+    pub(super) fn reserve_dynamic_task_resources_with_capacity(
+        &mut self,
+        required: TaskResourceRequirements,
+        stacks: [usize; DYNAMIC_TASK_CAPACITY],
+        dynamic_capacity: usize,
+    ) -> Result<TaskReservation, TaskAdmissionError> {
+        let available = self.tasks[(IDLE_SLOT + 1)..dynamic_slot_end(dynamic_capacity)]
             .iter()
             .filter(|task| task.state == State::Free)
             .count()
@@ -948,12 +982,21 @@ impl Sched {
         self.reservations.stack_size(reservation)
     }
 
+    #[cfg(test)]
     pub(super) fn alloc_reserved_dynamic_slot(
         &mut self,
         reservation: &TaskReservation,
     ) -> Result<(usize, Option<reservation::ReservedStack>), DriverError> {
+        self.alloc_reserved_dynamic_slot_with_capacity(reservation, DYNAMIC_TASK_CAPACITY)
+    }
+
+    pub(super) fn alloc_reserved_dynamic_slot_with_capacity(
+        &mut self,
+        reservation: &TaskReservation,
+        dynamic_capacity: usize,
+    ) -> Result<(usize, Option<reservation::ReservedStack>), DriverError> {
         self.reservations.ensure_consumable(reservation)?;
-        let slot = ((IDLE_SLOT + 1)..TASK_SLOT_COUNT)
+        let slot = ((IDLE_SLOT + 1)..dynamic_slot_end(dynamic_capacity))
             .find(|&i| self.tasks[i].state == State::Free)
             .ok_or(DriverError::NoTaskSlots)?;
         let stack = self.reservations.consume(reservation)?;
@@ -1040,6 +1083,11 @@ impl Sched {
     pub(super) fn has_equal_priority_ready(&self, priority: u8) -> bool {
         self.ready_head[priority as usize] != NIL
     }
+}
+
+fn dynamic_slot_end(dynamic_capacity: usize) -> usize {
+    debug_assert!(dynamic_capacity <= DYNAMIC_TASK_CAPACITY);
+    IDLE_SLOT + 1 + dynamic_capacity
 }
 
 #[cfg(kani)]

@@ -15,6 +15,7 @@ mod config;
 mod context;
 mod runtime;
 mod scheduling;
+mod storage;
 #[cfg(feature = "chip-ws63")]
 pub mod ws63;
 
@@ -22,3 +23,4 @@ pub use config::*;
 pub use hisi_rf_rtos_driver::TaskId;
 pub use runtime::*;
 pub use scheduling::{BudgetSpec, RunPolicy};
+pub use storage::{InstalledSchedulerStorage, SchedulerStackArena, SchedulerStorage, StorageError};

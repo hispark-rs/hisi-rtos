@@ -33,6 +33,28 @@ fn dynamic_allocation_reserves_main_and_idle_slots() {
 }
 
 #[test]
+fn caller_selected_capacity_bounds_dynamic_slots_and_diagnostics() {
+    let mut scheduler = Sched::new();
+    scheduler.tasks[0].state = State::Running;
+    scheduler.tasks[IDLE_SLOT].state = State::Ready;
+
+    for dynamic in 0..3 {
+        let slot = IDLE_SLOT + 1 + dynamic;
+        assert_eq!(scheduler.alloc_dynamic_slot_with_capacity(3), Ok(slot));
+        scheduler.tasks[slot].state = State::Ready;
+    }
+    assert_eq!(
+        scheduler.alloc_dynamic_slot_with_capacity(3),
+        Err(DriverError::NoTaskSlots)
+    );
+
+    let diagnostics = scheduler.diagnostics_with_capacity(3);
+    assert_eq!(diagnostics.dynamic_capacity, 3);
+    assert_eq!(diagnostics.dynamic_used, 3);
+    assert_eq!(diagnostics.dynamic_free, 0);
+}
+
+#[test]
 fn reservations_protect_promised_slots_from_ordinary_spawns() {
     let mut scheduler = Sched::new();
     let reservation = scheduler

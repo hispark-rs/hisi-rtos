@@ -68,7 +68,9 @@ impl Runtime for HisiRuntime {
     }
 
     fn task_capacity(&self) -> Result<TaskCapacity, DriverError> {
-        let diagnostics = critical_section::with(|cs| SCHED.borrow_ref(cs).diagnostics());
+        let capacity = dynamic_capacity();
+        let diagnostics =
+            critical_section::with(|cs| SCHED.borrow_ref(cs).diagnostics_with_capacity(capacity));
         TaskCapacity::new_with_reserved(
             usize::from(diagnostics.dynamic_capacity),
             usize::from(diagnostics.dynamic_used),
@@ -78,7 +80,12 @@ impl Runtime for HisiRuntime {
     }
 
     fn reserve_tasks(&self, required: NonZeroUsize) -> Result<TaskReservation, TaskAdmissionError> {
-        critical_section::with(|cs| SCHED.borrow_ref_mut(cs).reserve_dynamic_slots(required))
+        let capacity = dynamic_capacity();
+        critical_section::with(|cs| {
+            SCHED
+                .borrow_ref_mut(cs)
+                .reserve_dynamic_slots_with_capacity(required, capacity)
+        })
     }
 
     fn reserve_task_resources(
@@ -87,10 +94,11 @@ impl Runtime for HisiRuntime {
     ) -> Result<TaskReservation, TaskAdmissionError> {
         let stacks = preallocate_task_stacks(required, allocate, deallocate)?;
         let allocated = required.task_slots().get().min(DYNAMIC_TASK_CAPACITY);
+        let capacity = dynamic_capacity();
         let result = critical_section::with(|cs| {
             SCHED
                 .borrow_ref_mut(cs)
-                .reserve_dynamic_task_resources(required, stacks)
+                .reserve_dynamic_task_resources_with_capacity(required, stacks, capacity)
         });
         if result.is_err() {
             for stack in &stacks[..allocated] {

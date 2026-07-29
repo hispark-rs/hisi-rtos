@@ -24,13 +24,14 @@
 use crate::BudgetSpec;
 use crate::config::{
     ContractViolation, CooperativeConfig, CooperativeOnly, DYNAMIC_TASK_CAPACITY, Diagnostics,
-    Ported, PortedConfig, Resources, RuntimeHandle, SchedulerPort, StartError, TASK_SLOT_COUNT,
-    TaskDiagnostic, TaskState,
+    Ported, PortedConfig, Resources, RuntimeHandle, RuntimeResources, SchedulerPort, StartError,
+    TASK_SLOT_COUNT, TaskDiagnostic, TaskState,
 };
 #[cfg(target_arch = "riscv32")]
 use crate::context::initialize_irq_frame;
 use crate::context::{TaskContext, cooperative_context_switch_fallback};
 use crate::scheduling::{BudgetExpiry, BudgetState};
+use crate::storage::{ErasedSchedulerStorage, InstalledSchedulerStorage};
 use crate::{RunPolicy, TaskId};
 
 mod scheduler;
@@ -87,6 +88,7 @@ const _: () = assert!(TASK_SLOT_COUNT <= TASK_SLOT_MASK as usize + 1);
 struct StartState {
     config: StartConfig,
     resources: Resources,
+    storage: Option<ErasedSchedulerStorage>,
     port: Option<SchedulerPort>,
 }
 
@@ -113,15 +115,33 @@ fn start_state_opt() -> Option<StartState> {
 }
 
 fn allocate(size: usize) -> *mut u8 {
-    // SAFETY: the application-provided allocator contract accepts arbitrary
-    // non-zero task/control-block sizes and returns null on exhaustion.
-    unsafe { (start_state().resources.allocate)(size) }
+    let state = start_state();
+    if let Some(storage) = state.storage {
+        storage.allocate(size)
+    } else {
+        // SAFETY: the legacy application-provided allocator contract accepts
+        // arbitrary non-zero task-stack sizes and returns null on exhaustion.
+        unsafe { (state.resources.allocate)(size) }
+    }
 }
 
 fn deallocate(pointer: *mut u8) {
-    // SAFETY: every pointer passed here came from `allocate` and is released
-    // exactly once after it is no longer in use.
-    unsafe { (start_state().resources.deallocate)(pointer) }
+    let state = start_state();
+    if let Some(storage) = state.storage {
+        // SAFETY: every retired pointer came from this installed storage and is
+        // released exactly once after it is no longer in use.
+        unsafe { storage.deallocate(pointer) };
+    } else {
+        // SAFETY: every pointer passed here came from the legacy allocator and
+        // is released exactly once after it is no longer in use.
+        unsafe { (state.resources.deallocate)(pointer) };
+    }
+}
+
+fn dynamic_capacity() -> usize {
+    start_state()
+        .storage
+        .map_or(DYNAMIC_TASK_CAPACITY, |storage| storage.dynamic_capacity)
 }
 
 static SCHED: Mutex<RefCell<Sched>> = Mutex::new(RefCell::new(Sched::new()));
@@ -381,8 +401,13 @@ fn spawn(
     let slot = critical_section::with(|cs| -> Result<usize, DriverError> {
         let s = &mut *SCHED.borrow_ref_mut(cs);
         let (i, reserved_stack) = match reservation {
-            Some(reservation) => s.alloc_reserved_dynamic_slot(reservation)?,
-            None => (s.alloc_dynamic_slot()?, None),
+            Some(reservation) => {
+                s.alloc_reserved_dynamic_slot_with_capacity(reservation, dynamic_capacity())?
+            }
+            None => (
+                s.alloc_dynamic_slot_with_capacity(dynamic_capacity())?,
+                None,
+            ),
         };
         let stack = reserved_stack
             .map(|stack| stack.pointer as *mut u8)
@@ -634,6 +659,7 @@ pub fn start_cooperative(
         },
         resources,
         None,
+        None,
     )?;
     Ok(RuntimeHandle::new())
 }
@@ -651,6 +677,54 @@ pub fn start_with_port(
             max_scheduler_lock_duration: Some(config.max_scheduler_lock_duration),
         },
         resources,
+        None,
+        Some(port),
+    )?;
+    Ok(RuntimeHandle::new())
+}
+
+/// Starts the cooperative-only scheduler with caller-owned task-stack storage.
+pub fn start_cooperative_with_storage<const N: usize>(
+    config: CooperativeConfig,
+    resources: RuntimeResources,
+    storage: InstalledSchedulerStorage<N>,
+) -> Result<RuntimeHandle<CooperativeOnly>, StartError> {
+    start_inner(
+        StartConfig {
+            minimum_stack_size: config.minimum_stack_size,
+            radio_task_policy: RunPolicy::Cooperative,
+            max_scheduler_lock_duration: None,
+        },
+        Resources {
+            allocate: unavailable_allocate,
+            deallocate: unavailable_deallocate,
+            monotonic_ms: resources.monotonic_ms,
+        },
+        Some(storage.erased),
+        None,
+    )?;
+    Ok(RuntimeHandle::new())
+}
+
+/// Starts a target-backed scheduler with caller-owned task-stack storage.
+pub fn start_with_port_and_storage<const N: usize>(
+    config: PortedConfig,
+    resources: RuntimeResources,
+    storage: InstalledSchedulerStorage<N>,
+    port: SchedulerPort,
+) -> Result<RuntimeHandle<Ported>, StartError> {
+    start_inner(
+        StartConfig {
+            minimum_stack_size: config.minimum_stack_size,
+            radio_task_policy: config.radio_task_policy,
+            max_scheduler_lock_duration: Some(config.max_scheduler_lock_duration),
+        },
+        Resources {
+            allocate: unavailable_allocate,
+            deallocate: unavailable_deallocate,
+            monotonic_ms: resources.monotonic_ms,
+        },
+        Some(storage.erased),
         Some(port),
     )?;
     Ok(RuntimeHandle::new())
@@ -659,6 +733,7 @@ pub fn start_with_port(
 fn start_inner(
     config: StartConfig,
     resources: Resources,
+    storage: Option<ErasedSchedulerStorage>,
     port: Option<SchedulerPort>,
 ) -> Result<(), StartError> {
     let already_started = critical_section::with(|cs| {
@@ -669,6 +744,7 @@ fn start_inner(
             state.set(Some(StartState {
                 config,
                 resources,
+                storage,
                 port,
             }));
             false
@@ -688,8 +764,18 @@ fn start_inner(
 
 /// Snapshot scheduler counters without changing task state or scheduling.
 pub fn diagnostics() -> Diagnostics {
-    critical_section::with(|cs| SCHED.borrow_ref(cs).diagnostics())
+    critical_section::with(|cs| {
+        SCHED
+            .borrow_ref(cs)
+            .diagnostics_with_capacity(dynamic_capacity())
+    })
 }
+
+unsafe fn unavailable_allocate(_: usize) -> *mut u8 {
+    core::ptr::null_mut()
+}
+
+unsafe fn unavailable_deallocate(_: *mut u8) {}
 
 /// Copies scheduler slot state into `output` without changing scheduling.
 pub fn task_diagnostics(output: &mut [TaskDiagnostic]) -> usize {
