@@ -54,9 +54,34 @@ pub(super) fn mutex_state_is_busy(state: &MutexState) -> bool {
     state.owner != NIL || state.wait_head != NIL || state.wait_tail != NIL
 }
 
+fn map_execution_policy(
+    policy: TaskExecutionPolicy,
+    ported: bool,
+) -> Result<RunPolicy, DriverError> {
+    match policy {
+        TaskExecutionPolicy::Cooperative => Ok(RunPolicy::Cooperative),
+        TaskExecutionPolicy::Budgeted(budget) => {
+            if !ported {
+                return Err(DriverError::IncompatibleExecutionProfile);
+            }
+            let spec = BudgetSpec::try_new(budget.capacity_ms(), budget.replenishment_period_ms())
+                .ok_or(DriverError::IncompatibleContract)?;
+            Ok(RunPolicy::Budgeted(spec))
+        }
+        TaskExecutionPolicy::Preemptive { time_slice_ms } => {
+            if !ported {
+                return Err(DriverError::IncompatibleExecutionProfile);
+            }
+            Ok(RunPolicy::Preemptive {
+                time_slice: time_slice_ms,
+            })
+        }
+    }
+}
+
 impl Runtime for HisiRuntime {
     fn contract(&self) -> RuntimeContract {
-        RuntimeContract::V1_4
+        RuntimeContract::V1_5
     }
 
     fn execution_profile(&self) -> RuntimeExecutionProfile {
@@ -140,6 +165,27 @@ impl Runtime for HisiRuntime {
         encode_task_id(slot, generation)
     }
 
+    fn spawn_scheduled(
+        &self,
+        entry: hisi_rf_rtos_driver::TaskEntry,
+        arg: *mut c_void,
+        config: TaskConfig,
+        policy: TaskExecutionPolicy,
+    ) -> Result<TaskId, DriverError> {
+        let priority = config.priority.into_raw();
+        let slot = spawn(
+            entry,
+            arg,
+            config.stack_size.get(),
+            priority,
+            map_execution_policy(policy, start_state().port.is_some())?,
+            None,
+        )?;
+        let generation =
+            critical_section::with(|cs| SCHED.borrow_ref(cs).tasks[slot].identity_generation);
+        encode_task_id(slot, generation)
+    }
+
     fn spawn_reserved(
         &self,
         reservation: &TaskReservation,
@@ -154,6 +200,28 @@ impl Runtime for HisiRuntime {
             config.stack_size.get(),
             priority,
             start_state().config.radio_task_policy,
+            Some(reservation),
+        )?;
+        let generation =
+            critical_section::with(|cs| SCHED.borrow_ref(cs).tasks[slot].identity_generation);
+        encode_task_id(slot, generation)
+    }
+
+    fn spawn_reserved_scheduled(
+        &self,
+        reservation: &TaskReservation,
+        entry: hisi_rf_rtos_driver::TaskEntry,
+        arg: *mut c_void,
+        config: TaskConfig,
+        policy: TaskExecutionPolicy,
+    ) -> Result<TaskId, DriverError> {
+        let priority = config.priority.into_raw();
+        let slot = spawn(
+            entry,
+            arg,
+            config.stack_size.get(),
+            priority,
+            map_execution_policy(policy, start_state().port.is_some())?,
             Some(reservation),
         )?;
         let generation =
@@ -391,5 +459,43 @@ impl Runtime for HisiRuntime {
         })?;
         deallocate(pointer.get() as *mut u8);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use hisi_rf_rtos_driver::TaskBudget;
+
+    #[test]
+    fn ported_budget_maps_without_post_spawn_mutation() {
+        let capacity = NonZeroU32::new(10).unwrap();
+        let period = NonZeroU32::new(20).unwrap();
+        let policy = TaskExecutionPolicy::Budgeted(TaskBudget::try_new(capacity, period).unwrap());
+        assert_eq!(
+            map_execution_policy(policy, true),
+            Ok(RunPolicy::Budgeted(
+                BudgetSpec::try_new(capacity, period).unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn portless_rejects_forced_execution_policies() {
+        let one = NonZeroU32::new(1).unwrap();
+        assert_eq!(
+            map_execution_policy(
+                TaskExecutionPolicy::Preemptive { time_slice_ms: one },
+                false,
+            ),
+            Err(DriverError::IncompatibleExecutionProfile)
+        );
+        assert_eq!(
+            map_execution_policy(
+                TaskExecutionPolicy::Budgeted(TaskBudget::try_new(one, one).unwrap()),
+                false,
+            ),
+            Err(DriverError::IncompatibleExecutionProfile)
+        );
     }
 }

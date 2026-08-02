@@ -126,6 +126,11 @@ are non-zero and `capacity <= replenishment_period`.
   per-task stack size fails before consuming either resource. Releasing a live
   reservation frees only unconsumed stacks and slots; stacks already transferred
   to tasks follow the normal task-exit reclamation path.
+- **RTOS-POLICY-001:** A v1.5 scheduled spawn installs the requested execution
+  policy before publishing the new task as Ready. Port-less runtimes accept only
+  Cooperative; Budgeted and Preemptive fail with
+  `IncompatibleExecutionProfile`. Policy assignment must never be a second,
+  post-spawn operation.
 
 ## Waits And Priority Inheritance
 

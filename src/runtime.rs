@@ -20,8 +20,6 @@
 //! runtime-neutral radio driver contract. The application injects allocation
 //! and monotonic-time resources before any radio task can start.
 
-#[cfg(test)]
-use crate::BudgetSpec;
 use crate::config::{
     ContractViolation, CooperativeConfig, CooperativeOnly, DYNAMIC_TASK_CAPACITY, Diagnostics,
     Ported, PortedConfig, Resources, RuntimeHandle, RuntimeResources, SchedulerPort, StartError,
@@ -30,7 +28,7 @@ use crate::config::{
 #[cfg(target_arch = "riscv32")]
 use crate::context::initialize_irq_frame;
 use crate::context::{TaskContext, cooperative_context_switch_fallback};
-use crate::scheduling::{BudgetExpiry, BudgetState};
+use crate::scheduling::{BudgetExpiry, BudgetSpec, BudgetState};
 use crate::storage::{ErasedSchedulerStorage, InstalledSchedulerStorage};
 use crate::{RunPolicy, TaskId};
 
@@ -66,8 +64,9 @@ use embassy_time_driver::Driver as EmbassyTimeDriver;
 use embassy_time_queue_utils::Queue as EmbassyTimeQueue;
 use hisi_rf_rtos_driver::{
     Error as DriverError, MutexHandle, Runtime, RuntimeContract, RuntimeExecutionProfile,
-    SemaphoreHandle, TaskAdmissionError, TaskCapacity, TaskConfig, TaskPriority, TaskReservation,
-    TaskResourceRequirements, WaitCancellationOutcome, WaitOutcome, WaitTimeout,
+    SemaphoreHandle, TaskAdmissionError, TaskCapacity, TaskConfig, TaskExecutionPolicy,
+    TaskPriority, TaskReservation, TaskResourceRequirements, WaitCancellationOutcome, WaitOutcome,
+    WaitTimeout,
 };
 
 /// Contract-v1 priority levels: 0 is highest, 31 is lowest.

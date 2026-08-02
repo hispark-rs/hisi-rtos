@@ -23,6 +23,12 @@ deadline, and restores it with `mret`.
 only by `start_with_port`, whose returned capability is required for policy
 changes. A firmware that hosts vendor workers selects an explicit budget;
 ordinary Rust/Embassy execution remains cooperative unless deliberately changed.
+Runtime contract v1.5 also lets a radio adapter create a task with its
+Cooperative, Budgeted, or Preemptive policy already installed. This removes the
+spawn-then-mutate race: a budgeted worker cannot run once under an accidental
+default policy before the scheduler applies its CPU quota. Port-less runtimes
+reject forced policies, while target-backed runtimes map the chip-neutral
+millisecond contract onto the native `RunPolicy` before making the task ready.
 Exited stacks are reclaimed by another task,
 and nested scheduler locks suppress preemption until the outermost unlock.
 The configured scheduler-lock deadline is a fail-stop contract: a target port
