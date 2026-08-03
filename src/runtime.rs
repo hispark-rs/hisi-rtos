@@ -482,21 +482,20 @@ fn execute_switch(intent: SwitchIntent) {
             machine_interrupts_enabled(),
             "ported context switch requested while machine interrupts are disabled"
         );
-        let generation = critical_section::with(|cs| {
-            let s = &mut *SCHED.borrow_ref_mut(cs);
-            if !s.commit_switch_intent(intent) {
-                return None;
-            }
+        critical_section::with(|cs| {
+            let s = SCHED.borrow_ref(cs);
             assert!(
-                s.tasks[next].saved_frame != 0,
+                s.pending_switch
+                    .is_some_and(|pending| pending.sequence == intent.sequence)
+                    || s.tasks[prev].resume_generation != intent.previous_resume_generation,
+                "ported switch intent was not committed before delivery"
+            );
+            assert!(
+                s.tasks[next].saved_frame != 0 || s.current == next,
                 "target task has no trap frame"
             );
-            Some(intent.previous_resume_generation)
         });
-        let Some(generation) = generation else {
-            rearm_timer();
-            return;
-        };
+        let generation = intent.previous_resume_generation;
         rearm_timer();
         (port.pend_reschedule)();
         loop {
@@ -528,6 +527,14 @@ fn execute_switch(intent: SwitchIntent) {
     unsafe { cooperative_context_switch_fallback(op, np) };
 }
 
+fn prepare_switch(scheduler: &mut Sched, previous: usize, target: usize) -> SwitchIntent {
+    if target != previous && start_state().port.is_some() {
+        scheduler.prepare_committed_switch_intent(previous, target)
+    } else {
+        scheduler.prepare_switch_intent(previous, target)
+    }
+}
+
 fn switch_away(prev: usize) {
     if start_state().port.is_some()
         && critical_section::with(|cs| {
@@ -542,7 +549,7 @@ fn switch_away(prev: usize) {
         let s = &mut *SCHED.borrow_ref_mut(cs);
         s.wake_sleepers(now);
         let next = s.ready_pop_or_idle();
-        s.prepare_switch_intent(prev, next)
+        prepare_switch(s, prev, next)
     });
     execute_switch(intent);
 }
@@ -561,7 +568,7 @@ fn yield_now() -> Result<(), DriverError> {
         // priority queue would immediately select the yielding high-priority
         // task again and starve lower-priority initialization work.
         Ok(s.take_yield_target(cur, now)
-            .map(|next| s.prepare_switch_intent(cur, next)))
+            .map(|next| prepare_switch(s, cur, next)))
     })?;
     if let Some(intent) = target {
         execute_switch(intent);

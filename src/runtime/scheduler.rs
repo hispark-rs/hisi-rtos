@@ -526,6 +526,24 @@ impl Sched {
         intent
     }
 
+    /// Creates and commits a switch ticket while the caller still owns the
+    /// scheduler critical section.
+    ///
+    /// A ported switch must not carry a detached target through thread-local
+    /// state before the scheduler records ownership in `pending_switch`.
+    pub(super) fn prepare_committed_switch_intent(
+        &mut self,
+        previous: usize,
+        target: usize,
+    ) -> SwitchIntent {
+        let intent = self.prepare_switch_intent(previous, target);
+        assert!(
+            self.commit_switch_intent(intent),
+            "fresh switch intent failed to commit"
+        );
+        intent
+    }
+
     /// Commits a thread-mode switch intent unless an intervening IRQ already
     /// completed the handoff and resumed the source task.
     pub(super) fn commit_switch_intent(&mut self, intent: SwitchIntent) -> bool {

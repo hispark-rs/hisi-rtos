@@ -494,6 +494,22 @@ fn switch_intent_is_committed_and_consumed_exactly_once() {
 }
 
 #[test]
+fn ported_switch_ticket_owns_target_before_leaving_scheduler_lock() {
+    let mut scheduler = Sched::new();
+    scheduler.current = 0;
+    scheduler.tasks[0].identity_generation = 1;
+    scheduler.tasks[0].state = State::Ready;
+    scheduler.tasks[2].identity_generation = 7;
+    scheduler.tasks[2].state = State::Ready;
+
+    let intent = scheduler.prepare_committed_switch_intent(0, 2);
+
+    assert_eq!(scheduler.pending_switch.unwrap().sequence, intent.sequence);
+    assert_eq!(scheduler.ready_pop(), NIL);
+    assert_eq!(scheduler.consume_pending_switch(), Some((0, 2)));
+}
+
+#[test]
 fn stale_switch_intent_restores_its_detached_target() {
     let mut scheduler = Sched::new();
     scheduler.current = 0;

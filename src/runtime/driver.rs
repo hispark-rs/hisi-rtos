@@ -378,7 +378,7 @@ impl Runtime for HisiRuntime {
             scheduler
                 .unlock_current_and_take_preemption(now)
                 .map(|target| {
-                    target.map(|(current, next)| scheduler.prepare_switch_intent(current, next))
+                    target.map(|(current, next)| prepare_switch(scheduler, current, next))
                 })
         })?;
         if let Some(intent) = preemption {
