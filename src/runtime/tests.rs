@@ -1,4 +1,5 @@
 use super::*;
+use hisi_rf_rtos_driver::{TaskResourceGroupRequirements, TaskResourceOwner};
 
 fn ready_task(scheduler: &mut Sched, slot: usize, priority: u8) {
     scheduler.tasks[slot].state = State::Ready;
@@ -195,6 +196,124 @@ fn task_stack_preallocation_rolls_back_every_partial_allocation() {
             available: 48 * 1024,
         })
     );
+    assert_eq!(released_count, 2);
+    assert_eq!(&released[..released_count], &[0x1000, 0x2000]);
+}
+
+fn heterogeneous_resource_groups() -> [TaskResourceGroupRequirements; 2] {
+    [
+        TaskResourceGroupRequirements::new(
+            TaskResourceOwner::new(NonZeroU32::new(1).unwrap()),
+            TaskResourceRequirements::new(
+                NonZeroUsize::new(2).unwrap(),
+                NonZeroUsize::new(24 * 1024).unwrap(),
+            )
+            .unwrap(),
+        ),
+        TaskResourceGroupRequirements::new(
+            TaskResourceOwner::new(NonZeroU32::new(2).unwrap()),
+            TaskResourceRequirements::new(
+                NonZeroUsize::new(1).unwrap(),
+                NonZeroUsize::new(8 * 1024).unwrap(),
+            )
+            .unwrap(),
+        ),
+    ]
+}
+
+#[test]
+fn heterogeneous_resource_plan_reserves_children_in_plan_order() {
+    let mut scheduler = Sched::new();
+    let groups = heterogeneous_resource_groups();
+    let plan = TaskResourcePlan::new(&groups).unwrap();
+    let mut stacks = [[0usize; DYNAMIC_TASK_CAPACITY]; TASK_RESOURCE_GROUP_CAPACITY];
+    stacks[0][..2].copy_from_slice(&[0x1000, 0x2000]);
+    stacks[1][0] = 0x3000;
+
+    let mut batch = scheduler
+        .reserve_dynamic_task_resource_plan_with_capacity(plan, stacks, DYNAMIC_TASK_CAPACITY)
+        .unwrap();
+    assert_eq!(batch.len(), 2);
+    assert_eq!(scheduler.diagnostics().dynamic_reserved, 3);
+
+    let vendor = batch.take(0).unwrap();
+    let worker = batch.take(1).unwrap();
+    assert_eq!(
+        scheduler.reservation_stack_size(&vendor),
+        Ok(Some(24 * 1024))
+    );
+    assert_eq!(
+        scheduler.reservation_stack_size(&worker),
+        Ok(Some(8 * 1024))
+    );
+    assert_eq!(
+        scheduler.release_task_reservation(&vendor).unwrap().count,
+        2
+    );
+    assert_eq!(
+        scheduler.release_task_reservation(&worker).unwrap().count,
+        1
+    );
+    assert_eq!(scheduler.diagnostics().dynamic_reserved, 0);
+}
+
+#[test]
+fn heterogeneous_slot_failure_leaves_no_partial_reservation() {
+    let mut scheduler = Sched::new();
+    let groups = heterogeneous_resource_groups();
+    let plan = TaskResourcePlan::new(&groups).unwrap();
+    let mut stacks = [[0usize; DYNAMIC_TASK_CAPACITY]; TASK_RESOURCE_GROUP_CAPACITY];
+    stacks[0][..2].copy_from_slice(&[0x1000, 0x2000]);
+    stacks[1][0] = 0x3000;
+
+    assert!(matches!(
+        scheduler.reserve_dynamic_task_resource_plan_with_capacity(plan, stacks, 2),
+        Err(TaskAdmissionError::InsufficientTaskGroupSlots {
+            owner,
+            required: 1,
+            available: 0,
+        }) if owner == groups[1].owner()
+    ));
+    assert_eq!(scheduler.diagnostics_with_capacity(2).dynamic_reserved, 0);
+}
+
+#[test]
+fn heterogeneous_stack_failure_rolls_back_every_prior_group() {
+    let groups = heterogeneous_resource_groups();
+    let plan = TaskResourcePlan::new(&groups).unwrap();
+    let mut allocation = 0usize;
+    let mut released = [0usize; 3];
+    let mut released_count = 0usize;
+
+    let result = driver::preallocate_task_resource_plan(
+        plan,
+        |_| {
+            if allocation == 2 {
+                core::ptr::null_mut()
+            } else {
+                allocation += 1;
+                (allocation * 0x1000) as *mut u8
+            }
+        },
+        |pointer| {
+            released[released_count] = pointer as usize;
+            released_count += 1;
+        },
+        || 7 * 1024,
+    );
+
+    assert!(matches!(
+        result,
+        Err(TaskAdmissionError::InsufficientTaskGroupStackMemory {
+            owner,
+            required,
+            available,
+            largest_contiguous,
+        }) if owner == groups[1].owner()
+            && required == 8 * 1024
+            && available == 0
+            && largest_contiguous == 7 * 1024
+    ));
     assert_eq!(released_count, 2);
     assert_eq!(&released[..released_count], &[0x1000, 0x2000]);
 }

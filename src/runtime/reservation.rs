@@ -110,6 +110,58 @@ impl ReservationTable {
         Ok(reservation)
     }
 
+    pub(super) fn reserve_plan_with_stacks(
+        &mut self,
+        plan: TaskResourcePlan<'_>,
+        available: usize,
+        stacks: [[usize; DYNAMIC_TASK_CAPACITY]; TASK_RESOURCE_GROUP_CAPACITY],
+    ) -> Result<TaskReservationBatch, TaskAdmissionError> {
+        let mut remaining_available = available;
+        for group in plan.groups().iter().copied() {
+            let required = group.resources().task_slots().get();
+            if required > remaining_available {
+                return Err(TaskAdmissionError::InsufficientTaskGroupSlots {
+                    owner: group.owner(),
+                    required,
+                    available: remaining_available,
+                });
+            }
+            remaining_available -= required;
+        }
+        if self.entries.iter().filter(|entry| !entry.active).count() < plan.groups().len() {
+            return Err(TaskAdmissionError::Runtime(DriverError::ResourceExhausted));
+        }
+
+        let mut reservations = [const { None }; TASK_RESOURCE_GROUP_CAPACITY];
+        let mut committed = 0usize;
+        for (index, group) in plan.groups().iter().copied().enumerate() {
+            match self.reserve_with_stacks(
+                group.resources(),
+                available.saturating_sub(
+                    plan.groups()[..index]
+                        .iter()
+                        .map(|group| group.resources().task_slots().get())
+                        .sum::<usize>(),
+                ),
+                stacks[index],
+            ) {
+                Ok(reservation) => {
+                    reservations[index] = Some(reservation);
+                    committed += 1;
+                }
+                Err(error) => {
+                    for reservation in reservations[..committed].iter().flatten() {
+                        let _ = self.release(reservation);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        // SAFETY: every populated token was created by this reservation table,
+        // entries are distinct, and `committed` covers exactly the live prefix.
+        Ok(unsafe { TaskReservationBatch::from_reservations(reservations, committed) })
+    }
+
     pub(super) fn stack_size(
         &self,
         reservation: &TaskReservation,

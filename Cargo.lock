@@ -158,9 +158,9 @@ dependencies = [
 
 [[package]]
 name = "hisi-alloc"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "faba70f76aab1e33186ee4a42c234e31f3fc618740d7faf9ddaa61da2f64fddc"
+checksum = "8ff938ca9f1efab40af5b1df83e76a4cebcfddf424006999eebdde80dc8cf1de"
 dependencies = [
  "critical-section",
  "linked_list_allocator",
@@ -186,16 +186,16 @@ dependencies = [
 
 [[package]]
 name = "hisi-rf-rtos-driver"
-version = "0.1.0-alpha.18"
+version = "0.1.0-alpha.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd219ace1f763dd23f666d2d22f76d1bb91d3b3278cb507e6329ae1f60495ee1"
+checksum = "b3c9e2bd31859f4fb022df129c1cc47e89927028308111ff0d59bb58857a6ce6"
 dependencies = [
  "critical-section",
 ]
 
 [[package]]
 name = "hisi-rtos"
-version = "0.1.0-alpha.18"
+version = "0.1.0-alpha.19"
 dependencies = [
  "critical-section",
  "embassy-time-driver",
@@ -484,9 +484,9 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "trybuild"
-version = "1.0.119"
+version = "1.0.120"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c5c9f7b7b1a048dd2bebdb7260b0cc71ec5587b19352fa5c3cd9e1c067103f0"
+checksum = "1e605bf6b39357663d8ba4e984f8be8da8df6bb32e81031d6889024ea8fd68e4"
 dependencies = [
  "glob",
  "serde",

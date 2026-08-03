@@ -46,6 +46,62 @@ pub(super) fn preallocate_task_stacks(
     Ok(stacks)
 }
 
+pub(super) struct PreallocatedTaskResourcePlan {
+    pub(super) stacks: [[usize; DYNAMIC_TASK_CAPACITY]; TASK_RESOURCE_GROUP_CAPACITY],
+    pub(super) counts: [usize; TASK_RESOURCE_GROUP_CAPACITY],
+}
+
+impl PreallocatedTaskResourcePlan {
+    fn empty() -> Self {
+        Self {
+            stacks: [[0; DYNAMIC_TASK_CAPACITY]; TASK_RESOURCE_GROUP_CAPACITY],
+            counts: [0; TASK_RESOURCE_GROUP_CAPACITY],
+        }
+    }
+
+    fn release_all(&mut self, release_stack: &mut impl FnMut(*mut u8)) {
+        for group in 0..TASK_RESOURCE_GROUP_CAPACITY {
+            for stack in &mut self.stacks[group][..self.counts[group]] {
+                if *stack != 0 {
+                    release_stack(*stack as *mut u8);
+                    *stack = 0;
+                }
+            }
+            self.counts[group] = 0;
+        }
+    }
+}
+
+pub(super) fn preallocate_task_resource_plan(
+    plan: TaskResourcePlan<'_>,
+    mut allocate_stack: impl FnMut(usize) -> *mut u8,
+    mut release_stack: impl FnMut(*mut u8),
+    mut largest_allocatable: impl FnMut() -> usize,
+) -> Result<PreallocatedTaskResourcePlan, TaskAdmissionError> {
+    let mut preallocated = PreallocatedTaskResourcePlan::empty();
+    for (group_index, group) in plan.groups().iter().copied().enumerate() {
+        let required = group.resources();
+        let stack_size = required.stack_bytes_per_task().get();
+        for slot in 0..required.task_slots().get() {
+            let stack = allocate_stack(stack_size);
+            if stack.is_null() {
+                let available = slot * stack_size;
+                let largest_contiguous = largest_allocatable();
+                preallocated.release_all(&mut release_stack);
+                return Err(TaskAdmissionError::InsufficientTaskGroupStackMemory {
+                    owner: group.owner(),
+                    required: required.total_stack_bytes(),
+                    available,
+                    largest_contiguous,
+                });
+            }
+            preallocated.stacks[group_index][slot] = stack as usize;
+            preallocated.counts[group_index] += 1;
+        }
+    }
+    Ok(preallocated)
+}
+
 pub(super) fn semaphore_state_has_waiters(state: &SemState) -> bool {
     state.wait_head != NIL || state.wait_tail != NIL
 }
@@ -81,7 +137,7 @@ fn map_execution_policy(
 
 impl Runtime for HisiRuntime {
     fn contract(&self) -> RuntimeContract {
-        RuntimeContract::V1_5
+        RuntimeContract::V1_6
     }
 
     fn execution_profile(&self) -> RuntimeExecutionProfile {
@@ -129,6 +185,28 @@ impl Runtime for HisiRuntime {
             for stack in &stacks[..allocated] {
                 deallocate(*stack as *mut u8);
             }
+        }
+        result
+    }
+
+    fn reserve_task_resource_plan(
+        &self,
+        plan: TaskResourcePlan<'_>,
+    ) -> Result<TaskReservationBatch, TaskAdmissionError> {
+        let mut preallocated =
+            preallocate_task_resource_plan(plan, allocate, deallocate, largest_allocatable_stack)?;
+        let capacity = dynamic_capacity();
+        let result = critical_section::with(|cs| {
+            SCHED
+                .borrow_ref_mut(cs)
+                .reserve_dynamic_task_resource_plan_with_capacity(
+                    plan,
+                    preallocated.stacks,
+                    capacity,
+                )
+        });
+        if result.is_err() {
+            preallocated.release_all(&mut deallocate);
         }
         result
     }

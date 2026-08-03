@@ -968,6 +968,21 @@ impl Sched {
             .reserve_with_stacks(required, available, stacks)
     }
 
+    pub(super) fn reserve_dynamic_task_resource_plan_with_capacity(
+        &mut self,
+        plan: TaskResourcePlan<'_>,
+        stacks: [[usize; DYNAMIC_TASK_CAPACITY]; TASK_RESOURCE_GROUP_CAPACITY],
+        dynamic_capacity: usize,
+    ) -> Result<TaskReservationBatch, TaskAdmissionError> {
+        let available = self.tasks[(IDLE_SLOT + 1)..dynamic_slot_end(dynamic_capacity)]
+            .iter()
+            .filter(|task| task.state == State::Free)
+            .count()
+            .saturating_sub(self.reservations.total_remaining());
+        self.reservations
+            .reserve_plan_with_stacks(plan, available, stacks)
+    }
+
     pub(super) fn release_task_reservation(
         &mut self,
         reservation: &TaskReservation,

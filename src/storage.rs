@@ -118,6 +118,7 @@ impl<const N: usize> SchedulerStorage<N> {
                 allocate: allocate::<N>,
                 deallocate: deallocate::<N>,
                 metrics: metrics::<N>,
+                largest_allocatable: largest_allocatable::<N>,
                 dynamic_capacity: N,
             },
             _capacity: PhantomData,
@@ -155,6 +156,13 @@ impl<const N: usize> InstalledSchedulerStorage<N> {
         // process-lifetime CHeap.
         unsafe { (self.erased.metrics)(self.erased.context) }
     }
+
+    /// Largest payload currently available with the scheduler's stack alignment.
+    pub fn largest_allocatable(&self) -> usize {
+        // SAFETY: installation binds context and function pointers to the same
+        // process-lifetime CHeap.
+        unsafe { (self.erased.largest_allocatable)(self.erased.context) }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -163,6 +171,7 @@ pub(crate) struct ErasedSchedulerStorage {
     allocate: unsafe fn(usize, usize) -> *mut u8,
     deallocate: unsafe fn(usize, *mut u8),
     metrics: unsafe fn(usize) -> HeapMetrics,
+    largest_allocatable: unsafe fn(usize) -> usize,
     pub(crate) dynamic_capacity: usize,
 }
 
@@ -177,6 +186,12 @@ impl ErasedSchedulerStorage {
         // SAFETY: the caller returns a live allocation obtained from this same
         // erased storage capability.
         unsafe { (self.deallocate)(self.context, pointer) };
+    }
+
+    pub(crate) fn largest_allocatable(self) -> usize {
+        // SAFETY: only installation constructs this erased capability with a
+        // matching context and function table.
+        unsafe { (self.largest_allocatable)(self.context) }
     }
 }
 
@@ -197,6 +212,11 @@ unsafe fn deallocate<const N: usize>(context: usize, pointer: *mut u8) {
 unsafe fn metrics<const N: usize>(context: usize) -> HeapMetrics {
     // SAFETY: `context` is created from a process-lifetime CHeap in install.
     unsafe { &*(context as *const CHeap) }.metrics()
+}
+
+unsafe fn largest_allocatable<const N: usize>(context: usize) -> usize {
+    // SAFETY: `context` is created from a process-lifetime CHeap in install.
+    unsafe { &*(context as *const CHeap) }.largest_allocatable(16)
 }
 
 #[cfg(test)]

@@ -64,9 +64,9 @@ use embassy_time_driver::Driver as EmbassyTimeDriver;
 use embassy_time_queue_utils::Queue as EmbassyTimeQueue;
 use hisi_rf_rtos_driver::{
     Error as DriverError, MutexHandle, Runtime, RuntimeContract, RuntimeExecutionProfile,
-    SemaphoreHandle, TaskAdmissionError, TaskCapacity, TaskConfig, TaskExecutionPolicy,
-    TaskPriority, TaskReservation, TaskResourceRequirements, WaitCancellationOutcome, WaitOutcome,
-    WaitTimeout,
+    SemaphoreHandle, TASK_RESOURCE_GROUP_CAPACITY, TaskAdmissionError, TaskCapacity, TaskConfig,
+    TaskExecutionPolicy, TaskPriority, TaskReservation, TaskReservationBatch, TaskResourcePlan,
+    TaskResourceRequirements, WaitCancellationOutcome, WaitOutcome, WaitTimeout,
 };
 
 /// Contract-v1 priority levels: 0 is highest, 31 is lowest.
@@ -135,6 +135,13 @@ fn deallocate(pointer: *mut u8) {
         // is released exactly once after it is no longer in use.
         unsafe { (state.resources.deallocate)(pointer) };
     }
+}
+
+fn largest_allocatable_stack() -> usize {
+    start_state()
+        .storage
+        .map(ErasedSchedulerStorage::largest_allocatable)
+        .unwrap_or(0)
 }
 
 fn dynamic_capacity() -> usize {
