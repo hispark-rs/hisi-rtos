@@ -1057,6 +1057,8 @@ fn semaphore_waiters_are_priority_fifo_and_reorder_on_priority_change() {
         unsafe { release_semaphore_locked(&mut scheduler, &mut *semaphore.inner.get(), 0) };
     assert_eq!(granted, low);
     assert!(scheduler.tasks[low].sem_granted);
+    assert!(matches!(scheduler.tasks[low].state, State::Ready));
+    assert_eq!(scheduler.ready_pop(), low);
 }
 
 #[test]
@@ -1147,6 +1149,9 @@ fn cancelling_mutex_handoff_releases_unconsumed_ownership() {
     release_mutex_locked(&mut scheduler, state, owner, 10);
 
     assert_eq!(state.owner, waiter);
+    assert!(matches!(scheduler.tasks[waiter].state, State::Ready));
+    assert_eq!(scheduler.ready_pop(), waiter);
+    scheduler.make_ready(waiter, 10);
     assert_eq!(
         cancel_wait_locked(&mut scheduler, waiter, 11),
         WaitCancellationOutcome::Cancelled

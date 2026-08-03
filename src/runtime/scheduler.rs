@@ -655,6 +655,7 @@ impl Sched {
         Some((current, next))
     }
 
+    #[cfg(test)]
     pub(super) fn take_preemption_target(&mut self, now: u64) -> Option<(usize, usize)> {
         self.take_reschedule_target(false, now)
     }

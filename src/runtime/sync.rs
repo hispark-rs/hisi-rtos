@@ -180,27 +180,20 @@ impl Semaphore {
 
     /// Release (V). Wakes one waiter if any, else increments the count.
     pub(super) fn up(&self) -> Result<(), DriverError> {
-        let machine_interrupts_enabled = machine_interrupts_enabled();
         let now = now_ms();
-        let mut defer_reschedule = false;
-        let preemption = critical_section::with(|cs| {
+        let request_deferred_switch = critical_section::with(|cs| {
             let s = &mut *SCHED.borrow_ref_mut(cs);
             // SAFETY: exclusive under the critical section.
             let st = unsafe { &mut *self.inner.get() };
-            release_semaphore_locked(s, st, now);
+            let waiter = release_semaphore_locked(s, st, now);
             let interrupt_depth = INTERRUPT_DEPTH.borrow(cs).get();
-            if interrupt_depth == 0 && machine_interrupts_enabled {
-                s.take_preemption_target(now)
-                    .map(|(current, next)| s.prepare_switch_intent(current, next))
-            } else {
-                defer_reschedule = interrupt_depth == 0 && !machine_interrupts_enabled;
-                None
-            }
+            waiter != NIL && interrupt_depth == 0
         });
-        if let Some(intent) = preemption {
-            execute_switch(intent);
-        }
-        if defer_reschedule {
+        // Keep the woken task owned by the ready queue until the trap epilogue
+        // selects it. Detaching it into a thread-local switch intent here leaves
+        // an interrupt window in which neither the queue nor the scheduler owns
+        // the task.
+        if request_deferred_switch {
             request_reschedule();
         }
         rearm_timer();
@@ -321,10 +314,8 @@ impl RtosMutex {
     }
 
     pub(super) fn unlock(&self) -> Result<(), DriverError> {
-        let machine_interrupts_enabled = machine_interrupts_enabled();
         let now = now_ms();
-        let mut defer_reschedule = false;
-        let preemption = critical_section::with(|cs| {
+        let request_deferred_switch = critical_section::with(|cs| {
             let s = &mut *SCHED.borrow_ref_mut(cs);
             let current = s.current;
             // SAFETY: exclusive under the scheduler critical section.
@@ -334,23 +325,15 @@ impl RtosMutex {
             }
             state.depth -= 1;
             if state.depth != 0 {
-                return Ok(None);
+                return Ok(false);
             }
+            let woke_waiter = state.wait_head != NIL;
             release_mutex_locked(s, state, current, now);
 
             let interrupt_depth = INTERRUPT_DEPTH.borrow(cs).get();
-            Ok(if interrupt_depth == 0 && machine_interrupts_enabled {
-                s.take_preemption_target(now)
-                    .map(|(current, next)| s.prepare_switch_intent(current, next))
-            } else {
-                defer_reschedule = interrupt_depth == 0 && !machine_interrupts_enabled;
-                None
-            })
+            Ok(woke_waiter && interrupt_depth == 0)
         })?;
-        if let Some(intent) = preemption {
-            execute_switch(intent);
-        }
-        if defer_reschedule {
+        if request_deferred_switch {
             request_reschedule();
         }
         rearm_timer();

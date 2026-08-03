@@ -338,10 +338,8 @@ impl Runtime for HisiRuntime {
 
     fn cancel_wait(&self, task: TaskId) -> Result<WaitCancellationOutcome, DriverError> {
         let (slot, generation) = decode_task_id(task)?;
-        let machine_interrupts_enabled = machine_interrupts_enabled();
         let now = now_ms();
-        let mut defer_reschedule = false;
-        let (outcome, preemption) = critical_section::with(|cs| {
+        let (outcome, request_deferred_switch) = critical_section::with(|cs| {
             if INTERRUPT_DEPTH.borrow(cs).get() != 0 {
                 return Err(DriverError::InvalidContext);
             }
@@ -353,22 +351,9 @@ impl Runtime for HisiRuntime {
                 return Err(DriverError::InvalidHandle);
             }
             let outcome = cancel_wait_locked(scheduler, slot, now);
-            let preemption =
-                if outcome == WaitCancellationOutcome::Cancelled && machine_interrupts_enabled {
-                    scheduler
-                        .take_preemption_target(now)
-                        .map(|(current, next)| scheduler.prepare_switch_intent(current, next))
-                } else {
-                    defer_reschedule = outcome == WaitCancellationOutcome::Cancelled
-                        && !machine_interrupts_enabled;
-                    None
-                };
-            Ok((outcome, preemption))
+            Ok((outcome, outcome == WaitCancellationOutcome::Cancelled))
         })?;
-        if let Some(intent) = preemption {
-            execute_switch(intent);
-        }
-        if defer_reschedule {
+        if request_deferred_switch {
             request_reschedule();
         }
         rearm_timer();
