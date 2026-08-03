@@ -440,6 +440,30 @@ fn completed_irq_switch_restores_the_detached_thread_target() {
 }
 
 #[test]
+fn resumed_switch_away_does_not_detach_another_ready_task() {
+    let mut scheduler = Sched::new();
+    scheduler.started = true;
+    scheduler.current = 4;
+    scheduler.tasks[4].state = State::Running;
+    ready_task(&mut scheduler, 2, 3);
+
+    assert_eq!(scheduler.take_switch_away_target(4), None);
+    assert_eq!(scheduler.ready_pop(), 2);
+}
+
+#[test]
+fn blocked_switch_away_detaches_the_next_ready_task() {
+    let mut scheduler = Sched::new();
+    scheduler.started = true;
+    scheduler.current = 4;
+    scheduler.tasks[4].state = State::Blocked;
+    ready_task(&mut scheduler, 2, 3);
+
+    assert_eq!(scheduler.take_switch_away_target(4), Some(2));
+    assert_eq!(scheduler.ready_pop(), NIL);
+}
+
+#[test]
 fn pending_thread_switch_is_not_mistaken_for_a_completed_irq_switch() {
     let mut scheduler = Sched::new();
     scheduler.current = 0;

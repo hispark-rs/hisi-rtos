@@ -536,22 +536,16 @@ fn prepare_switch(scheduler: &mut Sched, previous: usize, target: usize) -> Swit
 }
 
 fn switch_away(prev: usize) {
-    if start_state().port.is_some()
-        && critical_section::with(|cs| {
-            let s = SCHED.borrow_ref(cs);
-            s.current == prev && s.tasks[prev].state == State::Running
-        })
-    {
-        return;
-    }
     let now = now_ms();
     let intent = critical_section::with(|cs| {
         let s = &mut *SCHED.borrow_ref_mut(cs);
         s.wake_sleepers(now);
-        let next = s.ready_pop_or_idle();
-        prepare_switch(s, prev, next)
+        s.take_switch_away_target(prev)
+            .map(|next| prepare_switch(s, prev, next))
     });
-    execute_switch(intent);
+    if let Some(intent) = intent {
+        execute_switch(intent);
+    }
 }
 
 /// Yield the CPU: requeue the current task and run the next ready one.

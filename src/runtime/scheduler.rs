@@ -487,6 +487,19 @@ impl Sched {
         Some(next)
     }
 
+    /// Selects the target for a thread-mode block/sleep/exit handoff.
+    ///
+    /// A timer or software interrupt may complete the requested handoff after
+    /// the caller marks `previous` non-running but before it re-enters the
+    /// scheduler here. If that task has already resumed, the handoff is done;
+    /// do not detach another ready task or create a stale switch intent.
+    pub(super) fn take_switch_away_target(&mut self, previous: usize) -> Option<usize> {
+        if self.current == previous && self.tasks[previous].state == State::Running {
+            return None;
+        }
+        Some(self.ready_pop_or_idle())
+    }
+
     fn task_ref(&self, slot: usize) -> TaskRef {
         TaskRef {
             slot,
