@@ -492,6 +492,7 @@ fn priority_change_keeps_pending_target_detached() {
     assert_eq!(scheduler.tasks[target].state, State::Ready);
     assert!(!scheduler.ready_contains(target));
     assert_eq!(scheduler.pending_switch.unwrap().target.slot, target);
+    assert_eq!(scheduler.diagnostics.detached_pending_priority_mutations, 1);
 }
 
 #[test]
@@ -511,6 +512,7 @@ fn policy_change_keeps_pending_target_detached() {
     assert_eq!(scheduler.tasks[target].state, State::Ready);
     assert!(!scheduler.ready_contains(target));
     assert_eq!(scheduler.pending_switch.unwrap().target.slot, target);
+    assert_eq!(scheduler.diagnostics.detached_pending_policy_mutations, 1);
 }
 
 #[test]

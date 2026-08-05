@@ -127,6 +127,12 @@ pub struct Diagnostics {
     pub switch_intents_cancelled_stale: u32,
     pub switch_intents_cancelled_identity: u32,
     pub switch_intents_completed: u32,
+    /// Priority mutations observed while a pending switch ticket exclusively
+    /// owned a detached Ready target.
+    pub detached_pending_priority_mutations: u32,
+    /// Policy mutations observed while a pending switch ticket exclusively
+    /// owned a detached Ready target.
+    pub detached_pending_policy_mutations: u32,
     pub time_slice_preemptions: u32,
     pub priority_inheritances: u32,
     pub yields: u32,
@@ -235,6 +241,8 @@ impl Diagnostics {
         switch_intents_cancelled_stale: 0,
         switch_intents_cancelled_identity: 0,
         switch_intents_completed: 0,
+        detached_pending_priority_mutations: 0,
+        detached_pending_policy_mutations: 0,
         time_slice_preemptions: 0,
         priority_inheritances: 0,
         yields: 0,

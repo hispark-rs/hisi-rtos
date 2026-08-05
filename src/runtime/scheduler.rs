@@ -408,6 +408,17 @@ impl Sched {
             return;
         }
         let ready_queued = self.tasks[task].state == State::Ready && self.ready_contains(task);
+        if self.tasks[task].state == State::Ready
+            && !ready_queued
+            && self
+                .pending_switch
+                .is_some_and(|pending| pending.target.slot == task)
+        {
+            self.diagnostics.detached_pending_priority_mutations = self
+                .diagnostics
+                .detached_pending_priority_mutations
+                .saturating_add(1);
+        }
         let waiting_sem = self.tasks[task].waiting_sem;
         if ready_queued {
             self.ready_remove(task);
@@ -1059,6 +1070,17 @@ impl Sched {
 
     pub(super) fn set_run_policy(&mut self, slot: usize, policy: RunPolicy, now: u64) {
         let was_ready_queued = self.tasks[slot].state == State::Ready && self.ready_contains(slot);
+        if self.tasks[slot].state == State::Ready
+            && !was_ready_queued
+            && self
+                .pending_switch
+                .is_some_and(|pending| pending.target.slot == slot)
+        {
+            self.diagnostics.detached_pending_policy_mutations = self
+                .diagnostics
+                .detached_pending_policy_mutations
+                .saturating_add(1);
+        }
         let was_throttled = self.tasks[slot].state == State::Throttled;
         if was_ready_queued {
             self.ready_remove(slot);
