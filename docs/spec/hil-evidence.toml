@@ -31,6 +31,16 @@ parent_commit = "4d355dc89d8d3ec1478eb6252d93ec92a5a5954d"
 evidence_url = "https://github.com/hispark-rs/hisi-riscv-rs/blob/4d355dc89d8d3ec1478eb6252d93ec92a5a5954d/docs/plan/evidence/ws63-rtos-a5r-resource-lifecycle-2026-07-28.md"
 
 [[evidence]]
+marker = "A5R_READY_OWNERSHIP_OK"
+target = "WS63 paired pure-WPA3 SoftAP/STA"
+date = "2026-08-06"
+result = "pass"
+successful_runs = 20
+reset_mode = "paired J-Link nRST without reflashing"
+parent_commit = "71557ee3720ecb8e98828d7ffd71c9ba13a8f662"
+evidence_url = "https://github.com/hispark-rs/hisi-riscv-rs/blob/71557ee3720ecb8e98828d7ffd71c9ba13a8f662/docs/plan/evidence/ws63-rtos-ready-ownership-2026-08-06.md"
+
+[[evidence]]
 marker = "A3_PRIORITY_INHERITANCE_OK"
 target = "WS63"
 date = "2026-07-14"

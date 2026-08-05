@@ -35,6 +35,7 @@ implementation = ["src/runtime/scheduler.rs:Sched::ready_ownership_audit", "src/
 host_tests = ["tests::ready_ownership_audit_accepts_queued_and_pending_ready_tasks", "tests::ready_ownership_audit_detects_detached_duplicate_and_wrong_bucket", "tests::priority_change_keeps_pending_target_detached", "tests::policy_change_keeps_pending_target_detached"]
 kani = "runtime::scheduler::proofs::ready_ownership_audit_detects_invalid_ownership"
 tla = "spec/ReadyOwnership.tla:ReadyHasExactlyOneOwner; spec/ReadyOwnership.tla:QueueMembershipUnique; spec/ReadyOwnership.tla:QueuePriorityMatches; spec/ReadyOwnership.tla:CurrentRunningConsistent"
+hil = ["A5R_READY_OWNERSHIP_OK"]
 
 [[requirement]]
 id = "RTOS-SCHED-001"
