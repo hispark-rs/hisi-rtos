@@ -89,13 +89,13 @@ impl Semaphore {
     /// [`up`]: Semaphore::up
     fn down(&self) -> Result<bool, DriverError> {
         let switch_delivery_available = ensure_switch_delivery().is_ok();
-        let block = critical_section::with(|cs| -> Result<_, DriverError> {
+        let intent = critical_section::with(|cs| -> Result<_, DriverError> {
             let s = &mut *SCHED.borrow_ref_mut(cs);
             // SAFETY: exclusive under the critical section (single hart).
             let st = unsafe { &mut *self.inner.get() };
             if st.count > 0 {
                 st.count -= 1;
-                Ok(false)
+                Ok(None)
             } else {
                 if !switch_delivery_available {
                     return Err(DriverError::InvalidContext);
@@ -107,14 +107,14 @@ impl Semaphore {
                 s.tasks[cur].waiting_sem = self as *const Self as usize;
                 s.tasks[cur].sem_granted = false;
                 enqueue_waiter(s, st, cur);
-                Ok(true)
+                Ok(Some(prepare_switch_away_locked(s, cur)))
             }
         })?;
-        if block {
+        if let Some(intent) = intent {
             // Parked on this sem's wait queue; `up` will move us back to Ready.
             // Cancellation may revoke that direct grant before this task resumes,
             // so return the recorded grant state instead of assuming success.
-            switch_away(current_id());
+            execute_switch(intent);
             Ok(critical_section::with(|cs| {
                 let s = &mut *SCHED.borrow_ref_mut(cs);
                 let current = s.current;
@@ -138,16 +138,16 @@ impl Semaphore {
         }
         let switch_delivery_available = ensure_switch_delivery().is_ok();
         let deadline = now_ms().saturating_add(timeout_ms as u64);
-        let current = critical_section::with(|cs| -> Result<_, DriverError> {
+        let (immediate, intent) = critical_section::with(|cs| -> Result<_, DriverError> {
             let s = &mut *SCHED.borrow_ref_mut(cs);
             // SAFETY: exclusive under the critical section.
             let st = unsafe { &mut *self.inner.get() };
             if st.count > 0 {
                 st.count -= 1;
-                return Ok(None);
+                return Ok((Some(true), None));
             }
             if timeout_ms == 0 {
-                return Ok(Some(NIL));
+                return Ok((Some(false), None));
             }
             if !switch_delivery_available {
                 return Err(DriverError::InvalidContext);
@@ -159,23 +159,20 @@ impl Semaphore {
             s.tasks[cur].waiting_sem = self as *const Self as usize;
             s.tasks[cur].sem_granted = false;
             enqueue_waiter(s, st, cur);
-            Ok(Some(cur))
+            Ok((None, Some(prepare_switch_away_locked(s, cur))))
         })?;
-        if matches!(current, Some(slot) if slot != NIL) {
+        if intent.is_some() {
             rearm_timer();
         }
-        match current {
-            None => Ok(true),
-            Some(NIL) => Ok(false),
-            Some(current) => {
-                switch_away(current);
-                Ok(critical_section::with(|cs| {
-                    let s = &mut *SCHED.borrow_ref_mut(cs);
-                    let current = s.current;
-                    consume_semaphore_grant_locked(s, current)
-                }))
-            }
+        if let Some(result) = immediate {
+            return Ok(result);
         }
+        execute_switch(intent.expect("blocked semaphore wait has no switch intent"));
+        Ok(critical_section::with(|cs| {
+            let s = &mut *SCHED.borrow_ref_mut(cs);
+            let current = s.current;
+            consume_semaphore_grant_locked(s, current)
+        }))
     }
 
     /// Release (V). Wakes one waiter if any, else increments the count.
@@ -259,22 +256,22 @@ impl RtosMutex {
     pub(super) fn lock(&self, timeout_ms: u32) -> Result<bool, DriverError> {
         let switch_delivery_available = ensure_switch_delivery().is_ok();
         let deadline = now_ms().saturating_add(timeout_ms as u64);
-        let current = critical_section::with(|cs| {
+        let (immediate, intent) = critical_section::with(|cs| {
             let s = &mut *SCHED.borrow_ref_mut(cs);
             let current = s.current;
             // SAFETY: exclusive under the scheduler critical section.
             let state = unsafe { &mut *self.inner.get() };
             if state.owner == current {
                 state.depth = state.depth.checked_add(1).ok_or(DriverError::Runtime)?;
-                return Ok(None);
+                return Ok((Some(true), None));
             }
             if state.owner == NIL {
                 state.owner = current;
                 state.depth = 1;
-                return Ok(None);
+                return Ok((Some(true), None));
             }
             if timeout_ms == 0 {
-                return Ok(Some(NIL));
+                return Ok((Some(false), None));
             }
             if !switch_delivery_available {
                 return Err(DriverError::InvalidContext);
@@ -291,26 +288,23 @@ impl RtosMutex {
             s.tasks[current].sem_granted = false;
             enqueue_mutex_waiter(s, state, current);
             s.add_inheritance(owner, s.tasks[current].priority);
-            Ok(Some(current))
+            Ok((None, Some(prepare_switch_away_locked(s, current))))
         })?;
 
-        if matches!(current, Some(slot) if slot != NIL) {
+        if intent.is_some() {
             rearm_timer();
         }
-        match current {
-            None => Ok(true),
-            Some(NIL) => Ok(false),
-            Some(current) => {
-                switch_away(current);
-                Ok(critical_section::with(|cs| {
-                    let s = &mut *SCHED.borrow_ref_mut(cs);
-                    let granted = s.tasks[s.current].sem_granted;
-                    s.tasks[s.current].sem_granted = false;
-                    s.tasks[s.current].granted_mutex = 0;
-                    granted
-                }))
-            }
+        if let Some(result) = immediate {
+            return Ok(result);
         }
+        execute_switch(intent.expect("blocked mutex wait has no switch intent"));
+        Ok(critical_section::with(|cs| {
+            let s = &mut *SCHED.borrow_ref_mut(cs);
+            let granted = s.tasks[s.current].sem_granted;
+            s.tasks[s.current].sem_granted = false;
+            s.tasks[s.current].granted_mutex = 0;
+            granted
+        }))
     }
 
     pub(super) fn unlock(&self) -> Result<(), DriverError> {

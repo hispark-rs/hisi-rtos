@@ -535,17 +535,9 @@ fn prepare_switch(scheduler: &mut Sched, previous: usize, target: usize) -> Swit
     }
 }
 
-fn switch_away(prev: usize) {
-    let now = now_ms();
-    let intent = critical_section::with(|cs| {
-        let s = &mut *SCHED.borrow_ref_mut(cs);
-        s.wake_sleepers(now);
-        s.take_switch_away_target(prev)
-            .map(|next| prepare_switch(s, prev, next))
-    });
-    if let Some(intent) = intent {
-        execute_switch(intent);
-    }
+fn prepare_switch_away_locked(scheduler: &mut Sched, previous: usize) -> SwitchIntent {
+    let next = scheduler.detach_switch_away_target(previous);
+    prepare_switch(scheduler, previous, next)
 }
 
 /// Yield the CPU: requeue the current task and run the next ready one.
@@ -579,16 +571,16 @@ fn sleep_ms(ms: u32) -> Result<(), DriverError> {
     }
     ensure_switch_delivery()?;
     let wake_at = now_ms().saturating_add(ms as u64);
-    let prev = critical_section::with(|cs| -> Result<_, DriverError> {
+    let intent = critical_section::with(|cs| -> Result<_, DriverError> {
         let s = &mut *SCHED.borrow_ref_mut(cs);
         let cur = s.current_switch_guard()?;
         s.diagnostics.sleeps = s.diagnostics.sleeps.saturating_add(1);
         s.tasks[cur].state = State::Sleeping;
         s.tasks[cur].wake_at = wake_at;
-        Ok(cur)
+        Ok(prepare_switch_away_locked(s, cur))
     })?;
     rearm_timer();
-    switch_away(prev);
+    execute_switch(intent);
     reclaim_retired_stacks();
     Ok(())
 }
@@ -626,7 +618,7 @@ fn task_exit() -> ! {
     );
     // Retire the stack before switching away. A resumed task drains the retired
     // list only after it is running on a different stack.
-    let prev = critical_section::with(|cs| {
+    let intent = critical_section::with(|cs| {
         let s = &mut *SCHED.borrow_ref_mut(cs);
         let cur = s.current;
         assert_eq!(
@@ -637,9 +629,9 @@ fn task_exit() -> ! {
         let stack = s.tasks[cur].stack;
         s.tasks[cur] = Tcb::empty();
         s.retire_stack(stack);
-        cur
+        prepare_switch_away_locked(s, cur)
     });
-    switch_away(prev);
+    execute_switch(intent);
     unreachable!()
 }
 

@@ -177,6 +177,10 @@ pub struct TaskDiagnostic {
     pub task: usize,
     pub generation: u16,
     pub state: TaskState,
+    /// Whether this task currently has ownership in a scheduler ready queue.
+    pub ready_queued: bool,
+    /// Whether an unconsumed switch ticket currently owns this task as target.
+    pub pending_switch_target: bool,
     pub entry: usize,
     /// Bytes allocated for this task's stack.
     ///

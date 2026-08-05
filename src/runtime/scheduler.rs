@@ -289,6 +289,10 @@ impl Sched {
                     State::Sleeping => TaskState::Sleeping,
                     State::Throttled => TaskState::Throttled,
                 },
+                ready_queued: self.ready_contains(index),
+                pending_switch_target: self
+                    .pending_switch
+                    .is_some_and(|pending| pending.target.slot == index),
                 entry: task.entry.map_or(0, |entry| entry as usize),
                 stack_size: task.stack_size,
                 waiting_sem: task.waiting_sem,
@@ -383,7 +387,7 @@ impl Sched {
         }
     }
 
-    fn ready_contains(&self, task: usize) -> bool {
+    pub(super) fn ready_contains(&self, task: usize) -> bool {
         for priority in 0..PRIORITY_LEVELS {
             let mut current = self.ready_head[priority];
             for _ in 0..TASK_SLOT_COUNT {
@@ -403,9 +407,9 @@ impl Sched {
         if self.tasks[task].priority == priority {
             return;
         }
-        let ready = self.tasks[task].state == State::Ready;
+        let ready_queued = self.tasks[task].state == State::Ready && self.ready_contains(task);
         let waiting_sem = self.tasks[task].waiting_sem;
-        if ready {
+        if ready_queued {
             self.ready_remove(task);
         }
         if waiting_sem != 0 {
@@ -415,7 +419,7 @@ impl Sched {
             remove_waiter(self, state, task);
         }
         self.tasks[task].priority = priority;
-        if ready {
+        if ready_queued {
             self.ready_push(task);
         }
         if waiting_sem != 0 {
@@ -487,17 +491,20 @@ impl Sched {
         Some(next)
     }
 
-    /// Selects the target for a thread-mode block/sleep/exit handoff.
+    /// Detaches the target for a block/sleep/exit handoff.
     ///
-    /// A timer or software interrupt may complete the requested handoff after
-    /// the caller marks `previous` non-running but before it re-enters the
-    /// scheduler here. If that task has already resumed, the handoff is done;
-    /// do not detach another ready task or create a stale switch intent.
-    pub(super) fn take_switch_away_target(&mut self, previous: usize) -> Option<usize> {
-        if self.current == previous && self.tasks[previous].state == State::Running {
-            return None;
-        }
-        Some(self.ready_pop_or_idle())
+    /// The caller must invoke this in the same scheduler critical section that
+    /// changes `previous` from Running to a non-running state. Keeping the
+    /// transition and ownership transfer atomic prevents an IRQ from switching
+    /// away and resuming `previous` between those operations.
+    pub(super) fn detach_switch_away_target(&mut self, previous: usize) -> usize {
+        assert_eq!(self.current, previous, "switch-away source is not current");
+        assert_ne!(
+            self.tasks[previous].state,
+            State::Running,
+            "switch-away source is still running"
+        );
+        self.ready_pop_or_idle()
     }
 
     fn task_ref(&self, slot: usize) -> TaskRef {
@@ -1051,9 +1058,9 @@ impl Sched {
     }
 
     pub(super) fn set_run_policy(&mut self, slot: usize, policy: RunPolicy, now: u64) {
-        let was_ready = self.tasks[slot].state == State::Ready;
+        let was_ready_queued = self.tasks[slot].state == State::Ready && self.ready_contains(slot);
         let was_throttled = self.tasks[slot].state == State::Throttled;
-        if was_ready {
+        if was_ready_queued {
             self.ready_remove(slot);
         }
         let task = &mut self.tasks[slot];
@@ -1067,7 +1074,7 @@ impl Sched {
             task.state = State::Ready;
             task.metrics.on_ready(now);
         }
-        if was_ready || was_throttled {
+        if was_ready_queued || was_throttled {
             self.ready_push(slot);
         }
     }
