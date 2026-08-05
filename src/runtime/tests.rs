@@ -440,39 +440,110 @@ fn completed_irq_switch_restores_the_detached_thread_target() {
 }
 
 #[test]
-fn switch_away_detaches_exactly_one_ready_target() {
+fn resumed_switch_away_source_preserves_ready_target() {
     let mut scheduler = Sched::new();
     scheduler.started = true;
     scheduler.current = 4;
-    scheduler.tasks[4].state = State::Sleeping;
+    scheduler.tasks[4].identity_generation = 1;
+    scheduler.tasks[4].state = State::Running;
+    scheduler.tasks[4].resume_generation = 2;
+    scheduler.tasks[2].identity_generation = 2;
     ready_task(&mut scheduler, 2, 3);
 
-    assert_eq!(scheduler.detach_switch_away_target(4), 2);
-    assert_eq!(scheduler.ready_pop(), NIL);
+    assert!(scheduler.prepare_switch_away_decision(4, 1, true).is_none());
+    assert!(scheduler.ready_contains(2));
+    assert!(scheduler.pending_switch.is_none());
+    assert_eq!(scheduler.diagnostics.switch_intents_created, 0);
 }
 
 #[test]
-fn atomic_switch_away_commits_detached_target_ownership() {
+fn sleep_switch_away_commits_detached_target_ownership() {
     let mut scheduler = Sched::new();
     scheduler.started = true;
     scheduler.current = 4;
     scheduler.tasks[4].identity_generation = 1;
     scheduler.tasks[4].state = State::Sleeping;
+    scheduler.tasks[4].wake_at = 25;
+    scheduler.tasks[4].resume_generation = 3;
     scheduler.tasks[2].identity_generation = 2;
     ready_task(&mut scheduler, 2, 3);
 
-    let target = scheduler.detach_switch_away_target(4);
-    let intent = scheduler.prepare_committed_switch_intent(4, target);
+    let intent = scheduler
+        .prepare_switch_away_decision(4, 3, true)
+        .expect("sleep handoff must commit");
     let mut snapshot = [TaskDiagnostic::default(); TASK_SLOT_COUNT];
     scheduler.task_diagnostics(&mut snapshot, 0);
 
-    assert_eq!(target, 2);
     assert!(!snapshot[2].ready_queued);
     assert!(snapshot[2].pending_switch_target);
     assert_eq!(scheduler.consume_pending_switch(), Some((4, 2)));
     assert_eq!(scheduler.diagnostics.switch_intents_created, 1);
     assert_eq!(scheduler.diagnostics.switch_intents_committed, 1);
     assert_eq!(intent.target.slot, 2);
+    assert_eq!(scheduler.tasks[4].wake_at, 25);
+}
+
+#[test]
+fn semaphore_switch_away_preserves_wait_ownership() {
+    let mut scheduler = Sched::new();
+    scheduler.started = true;
+    scheduler.current = 4;
+    scheduler.tasks[4].identity_generation = 1;
+    scheduler.tasks[4].state = State::Blocked;
+    scheduler.tasks[4].waiting_sem = 0x1000;
+    scheduler.tasks[4].resume_generation = 5;
+    scheduler.tasks[2].identity_generation = 2;
+    ready_task(&mut scheduler, 2, 3);
+
+    let intent = scheduler
+        .prepare_switch_away_decision(4, 5, true)
+        .expect("semaphore handoff must commit");
+
+    assert_eq!(intent.target.slot, 2);
+    assert_eq!(scheduler.tasks[4].waiting_sem, 0x1000);
+    assert!(!scheduler.ready_contains(2));
+    assert_eq!(scheduler.pending_switch.unwrap().target.slot, 2);
+}
+
+#[test]
+fn mutex_switch_away_preserves_wait_ownership() {
+    let mut scheduler = Sched::new();
+    scheduler.started = true;
+    scheduler.current = 4;
+    scheduler.tasks[4].identity_generation = 1;
+    scheduler.tasks[4].state = State::Blocked;
+    scheduler.tasks[4].waiting_mutex = 0x2000;
+    scheduler.tasks[4].resume_generation = 7;
+    scheduler.tasks[2].identity_generation = 2;
+    ready_task(&mut scheduler, 2, 3);
+
+    let intent = scheduler
+        .prepare_switch_away_decision(4, 7, true)
+        .expect("mutex handoff must commit");
+
+    assert_eq!(intent.target.slot, 2);
+    assert_eq!(scheduler.tasks[4].waiting_mutex, 0x2000);
+    assert!(!scheduler.ready_contains(2));
+    assert_eq!(scheduler.pending_switch.unwrap().target.slot, 2);
+}
+
+#[test]
+fn task_exit_switch_away_commits_after_source_is_freed() {
+    let mut scheduler = Sched::new();
+    scheduler.started = true;
+    scheduler.current = 4;
+    scheduler.tasks[4] = Tcb::empty();
+    scheduler.tasks[2].identity_generation = 2;
+    ready_task(&mut scheduler, 2, 3);
+
+    let intent = scheduler
+        .prepare_switch_away_decision(4, 0, true)
+        .expect("task-exit handoff must commit");
+
+    assert_eq!(scheduler.tasks[4].state, State::Free);
+    assert_eq!(intent.target.slot, 2);
+    assert!(!scheduler.ready_contains(2));
+    assert_eq!(scheduler.pending_switch.unwrap().target.slot, 2);
 }
 
 #[test]
@@ -485,8 +556,10 @@ fn priority_change_keeps_pending_target_detached() {
     scheduler.tasks[2].identity_generation = 2;
     ready_task(&mut scheduler, 2, 3);
 
-    let target = scheduler.detach_switch_away_target(4);
-    let _intent = scheduler.prepare_committed_switch_intent(4, target);
+    let _intent = scheduler
+        .prepare_switch_away_decision(4, 0, true)
+        .expect("priority-mutation handoff must commit");
+    let target = 2;
     scheduler.set_effective_priority(target, 1);
 
     assert_eq!(scheduler.tasks[target].state, State::Ready);
@@ -505,24 +578,16 @@ fn policy_change_keeps_pending_target_detached() {
     scheduler.tasks[2].identity_generation = 2;
     ready_task(&mut scheduler, 2, 3);
 
-    let target = scheduler.detach_switch_away_target(4);
-    let _intent = scheduler.prepare_committed_switch_intent(4, target);
+    let _intent = scheduler
+        .prepare_switch_away_decision(4, 0, true)
+        .expect("policy-mutation handoff must commit");
+    let target = 2;
     scheduler.set_run_policy(target, RunPolicy::Cooperative, 12);
 
     assert_eq!(scheduler.tasks[target].state, State::Ready);
     assert!(!scheduler.ready_contains(target));
     assert_eq!(scheduler.pending_switch.unwrap().target.slot, target);
     assert_eq!(scheduler.diagnostics.detached_pending_policy_mutations, 1);
-}
-
-#[test]
-#[should_panic(expected = "switch-away source is still running")]
-fn switch_away_rejects_a_running_source() {
-    let mut scheduler = Sched::new();
-    scheduler.current = 4;
-    scheduler.tasks[4].state = State::Running;
-
-    let _ = scheduler.detach_switch_away_target(4);
 }
 
 #[test]

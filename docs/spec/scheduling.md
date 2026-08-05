@@ -175,15 +175,19 @@ are non-zero and `capacity <= replenishment_period`.
   task-exit path fails stop. Non-blocking wake/signal operations may update state
   with MIE cleared and pend deferred rescheduling. ISR wakeups remain valid
   because the current trap epilogue delivers the deferred switch.
-- **RTOS-PORT-004:** If an interrupt completes a task's pending handoff after
-  thread mode detached a target but before it issues the explicit switch request,
-  the resumed task must cancel that stale request and restore the detached target
-  to its original ready queue. It must not create multiple `Running` tasks or
-  strand an eligible task outside the ready queues. Thread-mode handoffs use a
-  sequence-bearing switch intent that captures source and target identity
-  generations plus the source resume generation. The trap consumes a committed
-  pending intent at most once. The earlier state-based recovery remains as a
-  compatibility guard until on-silicon ticket parity is established.
+- **RTOS-PORT-004:** A block, sleep, or exit handoff linearizes the source state
+  transition, source resume-generation check, ready-target ownership transfer,
+  and pending-intent commit in one scheduler critical section. It has exactly
+  two valid outcomes: either one committed pending intent uniquely owns the
+  detached target, or the source has resumed and the operation returns
+  `NoSwitch` without removing, duplicating, or reordering that ready target.
+  Thread-mode handoffs use a sequence-bearing switch intent that captures source
+  and target identity generations plus the source resume generation. The trap
+  consumes a committed pending intent at most once. The ticket-creation model
+  proves the prepare-or-observe-resume decision; the ticket-lifecycle model
+  separately proves commit, cancellation, identity reuse, and consumption. The
+  earlier state-based recovery remains as a compatibility guard until
+  on-silicon ticket parity is established.
 
 - **RTOS-TIMER-001:** Sleep, wait timeout, preemptive slice, budget exhaustion,
   budget replenishment, and Embassy deadlines share the earliest one-shot timer.

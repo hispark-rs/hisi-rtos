@@ -101,13 +101,17 @@ impl Semaphore {
                     return Err(DriverError::InvalidContext);
                 }
                 let cur = s.current_switch_guard()?;
+                let resume_generation = s.tasks[cur].resume_generation;
                 s.diagnostics.semaphore_blocks = s.diagnostics.semaphore_blocks.saturating_add(1);
                 s.tasks[cur].state = State::Blocked;
                 s.tasks[cur].wake_at = 0;
                 s.tasks[cur].waiting_sem = self as *const Self as usize;
                 s.tasks[cur].sem_granted = false;
                 enqueue_waiter(s, st, cur);
-                Ok(Some(prepare_switch_away_locked(s, cur)))
+                Ok(Some(
+                    prepare_switch_away_locked(s, cur, resume_generation)
+                        .expect("fresh semaphore switch-away decision was cancelled"),
+                ))
             }
         })?;
         if let Some(intent) = intent {
@@ -153,13 +157,20 @@ impl Semaphore {
                 return Err(DriverError::InvalidContext);
             }
             let cur = s.current_switch_guard()?;
+            let resume_generation = s.tasks[cur].resume_generation;
             s.diagnostics.semaphore_blocks = s.diagnostics.semaphore_blocks.saturating_add(1);
             s.tasks[cur].state = State::Blocked;
             s.tasks[cur].wake_at = deadline;
             s.tasks[cur].waiting_sem = self as *const Self as usize;
             s.tasks[cur].sem_granted = false;
             enqueue_waiter(s, st, cur);
-            Ok((None, Some(prepare_switch_away_locked(s, cur))))
+            Ok((
+                None,
+                Some(
+                    prepare_switch_away_locked(s, cur, resume_generation)
+                        .expect("fresh timed semaphore switch-away decision was cancelled"),
+                ),
+            ))
         })?;
         if intent.is_some() {
             rearm_timer();
@@ -282,13 +293,20 @@ impl RtosMutex {
             }
 
             let owner = state.owner;
+            let resume_generation = s.tasks[current].resume_generation;
             s.tasks[current].state = State::Blocked;
             s.tasks[current].wake_at = if timeout_ms == u32::MAX { 0 } else { deadline };
             s.tasks[current].waiting_mutex = self as *const Self as usize;
             s.tasks[current].sem_granted = false;
             enqueue_mutex_waiter(s, state, current);
             s.add_inheritance(owner, s.tasks[current].priority);
-            Ok((None, Some(prepare_switch_away_locked(s, current))))
+            Ok((
+                None,
+                Some(
+                    prepare_switch_away_locked(s, current, resume_generation)
+                        .expect("fresh mutex switch-away decision was cancelled"),
+                ),
+            ))
         })?;
 
         if intent.is_some() {

@@ -535,9 +535,16 @@ fn prepare_switch(scheduler: &mut Sched, previous: usize, target: usize) -> Swit
     }
 }
 
-fn prepare_switch_away_locked(scheduler: &mut Sched, previous: usize) -> SwitchIntent {
-    let next = scheduler.detach_switch_away_target(previous);
-    prepare_switch(scheduler, previous, next)
+fn prepare_switch_away_locked(
+    scheduler: &mut Sched,
+    previous: usize,
+    expected_resume_generation: u32,
+) -> Option<SwitchIntent> {
+    scheduler.prepare_switch_away_decision(
+        previous,
+        expected_resume_generation,
+        start_state().port.is_some(),
+    )
 }
 
 /// Yield the CPU: requeue the current task and run the next ready one.
@@ -574,10 +581,12 @@ fn sleep_ms(ms: u32) -> Result<(), DriverError> {
     let intent = critical_section::with(|cs| -> Result<_, DriverError> {
         let s = &mut *SCHED.borrow_ref_mut(cs);
         let cur = s.current_switch_guard()?;
+        let resume_generation = s.tasks[cur].resume_generation;
         s.diagnostics.sleeps = s.diagnostics.sleeps.saturating_add(1);
         s.tasks[cur].state = State::Sleeping;
         s.tasks[cur].wake_at = wake_at;
-        Ok(prepare_switch_away_locked(s, cur))
+        Ok(prepare_switch_away_locked(s, cur, resume_generation)
+            .expect("fresh sleep switch-away decision was cancelled"))
     })?;
     rearm_timer();
     execute_switch(intent);
@@ -629,7 +638,9 @@ fn task_exit() -> ! {
         let stack = s.tasks[cur].stack;
         s.tasks[cur] = Tcb::empty();
         s.retire_stack(stack);
-        prepare_switch_away_locked(s, cur)
+        let resume_generation = s.tasks[cur].resume_generation;
+        prepare_switch_away_locked(s, cur, resume_generation)
+            .expect("fresh task-exit switch-away decision was cancelled")
     });
     execute_switch(intent);
     unreachable!()

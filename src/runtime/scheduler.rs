@@ -502,20 +502,32 @@ impl Sched {
         Some(next)
     }
 
-    /// Detaches the target for a block/sleep/exit handoff.
+    /// Atomically prepares a block/sleep/exit handoff, or observes that the
+    /// source resumed before ownership could be transferred.
     ///
-    /// The caller must invoke this in the same scheduler critical section that
-    /// changes `previous` from Running to a non-running state. Keeping the
-    /// transition and ownership transfer atomic prevents an IRQ from switching
-    /// away and resuming `previous` between those operations.
-    pub(super) fn detach_switch_away_target(&mut self, previous: usize) -> usize {
-        assert_eq!(self.current, previous, "switch-away source is not current");
-        assert_ne!(
-            self.tasks[previous].state,
-            State::Running,
-            "switch-away source is still running"
-        );
-        self.ready_pop_or_idle()
+    /// The caller changes `previous` from Running to its destination state and
+    /// invokes this method while retaining the same scheduler critical section.
+    /// The source checks happen before the ready target is detached, so a stale
+    /// caller returns `None` without changing ready or pending ownership.
+    pub(super) fn prepare_switch_away_decision(
+        &mut self,
+        previous: usize,
+        expected_resume_generation: u32,
+        commit_before_unlock: bool,
+    ) -> Option<SwitchIntent> {
+        let source_is_unchanged = self.current == previous
+            && self.tasks[previous].state != State::Running
+            && self.tasks[previous].resume_generation == expected_resume_generation;
+        if !source_is_unchanged {
+            return None;
+        }
+
+        let target = self.ready_pop_or_idle();
+        let intent = self.prepare_switch_intent(previous, target);
+        if commit_before_unlock && !self.commit_switch_intent(intent) {
+            return None;
+        }
+        Some(intent)
     }
 
     fn task_ref(&self, slot: usize) -> TaskRef {
@@ -1219,5 +1231,49 @@ mod proofs {
         assert!(!scheduler.commit_switch_intent(intent));
         assert!(scheduler.ready_contains(2));
         assert!(scheduler.pending_switch.is_none());
+    }
+
+    #[kani::proof]
+    fn switch_away_prepare_or_observe_resume_is_atomic() {
+        let mut scheduler = Sched::new();
+        scheduler.current = 0;
+        scheduler.tasks[0].identity_generation = 1;
+        scheduler.tasks[0].resume_generation = 7;
+        scheduler.tasks[2].identity_generation = 2;
+        scheduler.tasks[2].state = State::Ready;
+        scheduler.tasks[2].priority = 3;
+        scheduler.ready_push(2);
+
+        let source_resumed = kani::any::<bool>();
+        if source_resumed {
+            scheduler.tasks[0].state = State::Running;
+            scheduler.tasks[0].resume_generation = 8;
+        } else {
+            let state = kani::any::<u8>();
+            kani::assume(state < 4);
+            scheduler.tasks[0].state = match state {
+                0 => State::Blocked,
+                1 => State::Sleeping,
+                2 => State::Throttled,
+                _ => State::Free,
+            };
+        }
+
+        let decision = scheduler.prepare_switch_away_decision(0, 7, true);
+        if source_resumed {
+            assert!(decision.is_none());
+            assert!(scheduler.ready_contains(2));
+            assert!(scheduler.pending_switch.is_none());
+            assert_eq!(scheduler.diagnostics.switch_intents_created, 0);
+            assert_eq!(scheduler.diagnostics.switch_intents_committed, 0);
+        } else {
+            let intent = decision.expect("non-running source must commit a switch");
+            assert_eq!(intent.previous.slot, 0);
+            assert_eq!(intent.target.slot, 2);
+            assert!(!scheduler.ready_contains(2));
+            assert_eq!(scheduler.pending_switch.unwrap().sequence, intent.sequence);
+            assert_eq!(scheduler.diagnostics.switch_intents_created, 1);
+            assert_eq!(scheduler.diagnostics.switch_intents_committed, 1);
+        }
     }
 }
