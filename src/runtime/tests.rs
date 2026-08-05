@@ -591,6 +591,78 @@ fn policy_change_keeps_pending_target_detached() {
 }
 
 #[test]
+fn ready_ownership_audit_accepts_queued_and_pending_ready_tasks() {
+    let mut scheduler = Sched::new();
+    scheduler.started = true;
+    scheduler.current = 4;
+    scheduler.tasks[4].identity_generation = 1;
+    scheduler.tasks[4].state = State::Sleeping;
+    scheduler.tasks[2].identity_generation = 2;
+    ready_task(&mut scheduler, 2, 3);
+    scheduler.tasks[3].identity_generation = 3;
+    ready_task(&mut scheduler, 3, 5);
+
+    let _ = scheduler
+        .prepare_switch_away_decision(4, 0, true)
+        .expect("switch target must be pending-owned");
+    let audit = scheduler.ready_ownership_audit();
+    let diagnostics = scheduler.diagnostics();
+    let mut tasks = [TaskDiagnostic::default(); TASK_SLOT_COUNT];
+    scheduler.task_diagnostics(&mut tasks, 0);
+
+    assert_eq!(audit.violations, 0);
+    assert_eq!(diagnostics.ready_ownership_violations, 0);
+    assert_eq!(tasks[2].ready_queue_memberships, 0);
+    assert_eq!(tasks[2].ready_queue_bucket, NO_READY_QUEUE_BUCKET);
+    assert!(tasks[2].pending_switch_target);
+    assert_eq!(tasks[3].ready_queue_memberships, 1);
+    assert_eq!(tasks[3].ready_queue_bucket, 5);
+}
+
+#[test]
+fn ready_ownership_audit_detects_detached_duplicate_and_wrong_bucket() {
+    let mut detached = Sched::new();
+    detached.tasks[2].state = State::Ready;
+    assert_ne!(detached.ready_ownership_audit().violations, 0);
+
+    let mut duplicate = Sched::new();
+    duplicate.tasks[2].state = State::Ready;
+    duplicate.tasks[2].priority = 3;
+    duplicate.ready_head[3] = 2;
+    duplicate.ready_tail[3] = 2;
+    duplicate.tasks[2].next = 2;
+    let duplicate_audit = duplicate.ready_ownership_audit();
+    let mut duplicate_tasks = [TaskDiagnostic::default(); TASK_SLOT_COUNT];
+    duplicate.task_diagnostics(&mut duplicate_tasks, 0);
+    assert_ne!(duplicate_audit.duplicate_memberships, 0);
+    assert_ne!(duplicate_audit.invalid_links, 0);
+    assert!(duplicate_tasks[2].ready_queue_memberships > 1);
+
+    let mut wrong_bucket = Sched::new();
+    wrong_bucket.tasks[2].state = State::Ready;
+    wrong_bucket.tasks[2].priority = 3;
+    wrong_bucket.ready_head[4] = 2;
+    wrong_bucket.ready_tail[4] = 2;
+    assert_eq!(wrong_bucket.ready_ownership_audit().wrong_priorities, 1);
+
+    let mut double_owned = Sched::new();
+    double_owned.tasks[0].identity_generation = 1;
+    double_owned.tasks[0].state = State::Ready;
+    double_owned.tasks[2].identity_generation = 2;
+    ready_task(&mut double_owned, 2, 3);
+    double_owned.ready_remove(2);
+    let intent = double_owned.prepare_switch_intent(0, 2);
+    assert!(double_owned.commit_switch_intent(intent));
+    double_owned.ready_push(2);
+    assert_ne!(double_owned.ready_ownership_audit().violations, 0);
+
+    let mut invalid_current = Sched::new();
+    invalid_current.started = true;
+    invalid_current.current = TASK_SLOT_COUNT;
+    assert_ne!(invalid_current.diagnostics().ready_ownership_violations, 0);
+}
+
+#[test]
 fn pending_thread_switch_is_not_mistaken_for_a_completed_irq_switch() {
     let mut scheduler = Sched::new();
     scheduler.current = 0;

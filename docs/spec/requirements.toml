@@ -30,6 +30,13 @@ implementation = ["src/runtime.rs:IDLE_SLOT", "src/config.rs:DYNAMIC_TASK_CAPACI
 host_tests = ["tests::dynamic_allocation_reserves_main_and_idle_slots", "tests::idle_is_selected_only_when_the_ready_queues_are_empty", "tests::idle_yield_hands_off_without_entering_the_ready_queue", "tests::timer_wakeup_preempts_idle_without_queueing_idle"]
 
 [[requirement]]
+id = "RTOS-STATE-004"
+implementation = ["src/runtime/scheduler.rs:Sched::ready_ownership_audit", "src/runtime/scheduler.rs:Sched::diagnostics_with_capacity", "src/runtime/scheduler.rs:Sched::task_diagnostics"]
+host_tests = ["tests::ready_ownership_audit_accepts_queued_and_pending_ready_tasks", "tests::ready_ownership_audit_detects_detached_duplicate_and_wrong_bucket", "tests::priority_change_keeps_pending_target_detached", "tests::policy_change_keeps_pending_target_detached"]
+kani = "runtime::scheduler::proofs::ready_ownership_audit_detects_invalid_ownership"
+tla = "spec/ReadyOwnership.tla:ReadyHasExactlyOneOwner; spec/ReadyOwnership.tla:QueueMembershipUnique; spec/ReadyOwnership.tla:QueuePriorityMatches; spec/ReadyOwnership.tla:CurrentRunningConsistent"
+
+[[requirement]]
 id = "RTOS-SCHED-001"
 implementation = ["src/runtime/scheduler.rs:ready_push", "src/runtime/scheduler.rs:ready_pop", "src/runtime/scheduler.rs:take_yield_target"]
 host_tests = ["tests::ready_queue_prefers_lower_priority_number_and_keeps_fifo", "tests::all_run_policies_use_effective_priority_then_fifo", "tests::cooperative_yield_hands_off_before_requeueing_higher_priority_task"]

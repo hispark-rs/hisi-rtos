@@ -32,6 +32,33 @@ pub(super) struct PendingSwitch {
     pub(super) target: TaskRef,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ReadyOwnershipAudit {
+    memberships: [u8; TASK_SLOT_COUNT],
+    buckets: [u8; TASK_SLOT_COUNT],
+    pub(super) violations: u8,
+    pub(super) duplicate_memberships: u8,
+    pub(super) wrong_priorities: u8,
+    pub(super) invalid_links: u8,
+}
+
+impl ReadyOwnershipAudit {
+    const fn empty() -> Self {
+        Self {
+            memberships: [0; TASK_SLOT_COUNT],
+            buckets: [NO_READY_QUEUE_BUCKET; TASK_SLOT_COUNT],
+            violations: 0,
+            duplicate_memberships: 0,
+            wrong_priorities: 0,
+            invalid_links: 0,
+        }
+    }
+
+    fn violation(&mut self) {
+        self.violations = self.violations.saturating_add(1);
+    }
+}
+
 /// Task entry signature (matches the OSAL `osal_kthread_func`).
 pub(super) type TaskFn = extern "C" fn(*mut c_void) -> *mut c_void;
 
@@ -223,9 +250,17 @@ impl Sched {
 
     pub(super) fn diagnostics_with_capacity(&self, dynamic_capacity: usize) -> Diagnostics {
         let mut snapshot = self.diagnostics;
+        let audit = self.ready_ownership_audit();
+        snapshot.ready_ownership_violations = audit.violations;
+        snapshot.ready_queue_duplicate_memberships = audit.duplicate_memberships;
+        snapshot.ready_queue_wrong_priorities = audit.wrong_priorities;
+        snapshot.ready_queue_invalid_links = audit.invalid_links;
         snapshot.dynamic_capacity = dynamic_capacity as u8;
         snapshot.current_task = self.current;
-        snapshot.current_lock_depth = self.tasks[self.current].scheduler_lock_depth;
+        snapshot.current_lock_depth = self
+            .tasks
+            .get(self.current)
+            .map_or(0, |task| task.scheduler_lock_depth);
         for task in &self.tasks {
             match task.state {
                 State::Ready => snapshot.ready_tasks = snapshot.ready_tasks.saturating_add(1),
@@ -275,6 +310,7 @@ impl Sched {
     }
 
     pub(super) fn task_diagnostics(&self, output: &mut [TaskDiagnostic], now: u64) -> usize {
+        let audit = self.ready_ownership_audit();
         let count = output.len().min(TASK_SLOT_COUNT);
         for (index, output) in output[..count].iter_mut().enumerate() {
             let task = &self.tasks[index];
@@ -289,10 +325,12 @@ impl Sched {
                     State::Sleeping => TaskState::Sleeping,
                     State::Throttled => TaskState::Throttled,
                 },
-                ready_queued: self.ready_contains(index),
+                ready_queued: audit.memberships[index] != 0,
                 pending_switch_target: self
                     .pending_switch
                     .is_some_and(|pending| pending.target.slot == index),
+                ready_queue_bucket: audit.buckets[index],
+                ready_queue_memberships: audit.memberships[index],
                 entry: task.entry.map_or(0, |entry| entry as usize),
                 stack_size: task.stack_size,
                 waiting_sem: task.waiting_sem,
@@ -401,6 +439,130 @@ impl Sched {
             }
         }
         false
+    }
+
+    /// Audits a stable scheduler snapshot without trusting task state or one
+    /// particular ready-list head. Every traversal is bounded by the task table
+    /// so a damaged intrusive link cannot hang diagnostics.
+    pub(super) fn ready_ownership_audit(&self) -> ReadyOwnershipAudit {
+        let mut audit = ReadyOwnershipAudit::empty();
+
+        for priority in 0..PRIORITY_LEVELS {
+            let head = self.ready_head[priority];
+            let tail = self.ready_tail[priority];
+            if (head == NIL) != (tail == NIL) {
+                audit.invalid_links = audit.invalid_links.saturating_add(1);
+                audit.violation();
+            }
+            if tail != NIL && tail >= TASK_SLOT_COUNT {
+                audit.invalid_links = audit.invalid_links.saturating_add(1);
+                audit.violation();
+            }
+
+            let mut current = head;
+            let mut last = NIL;
+            for _ in 0..TASK_SLOT_COUNT {
+                if current == NIL {
+                    break;
+                }
+                if current >= TASK_SLOT_COUNT {
+                    audit.invalid_links = audit.invalid_links.saturating_add(1);
+                    audit.violation();
+                    current = NIL;
+                    break;
+                }
+
+                let memberships = audit.memberships[current];
+                audit.memberships[current] = memberships.saturating_add(1);
+                if memberships != 0 {
+                    audit.duplicate_memberships = audit.duplicate_memberships.saturating_add(1);
+                    audit.violation();
+                } else {
+                    audit.buckets[current] = priority as u8;
+                }
+                if self.tasks[current].priority as usize != priority {
+                    audit.wrong_priorities = audit.wrong_priorities.saturating_add(1);
+                    audit.violation();
+                }
+                last = current;
+                current = self.tasks[current].next;
+            }
+
+            if current != NIL || (head != NIL && last != tail) {
+                audit.invalid_links = audit.invalid_links.saturating_add(1);
+                audit.violation();
+            }
+            if tail < TASK_SLOT_COUNT && self.tasks[tail].next != NIL {
+                audit.invalid_links = audit.invalid_links.saturating_add(1);
+                audit.violation();
+            }
+        }
+
+        let pending_target = self.pending_switch.and_then(|pending| {
+            let target = pending.target.slot;
+            if target >= TASK_SLOT_COUNT
+                || self.tasks[target].identity_generation != pending.target.identity_generation
+            {
+                audit.violation();
+                None
+            } else {
+                Some(target)
+            }
+        });
+
+        let mut running_tasks = 0u8;
+        for task in 0..TASK_SLOT_COUNT {
+            let queued = audit.memberships[task];
+            let pending = pending_target == Some(task);
+            match self.tasks[task].state {
+                State::Ready if task == IDLE_SLOT => {
+                    if queued != 0 {
+                        audit.violation();
+                    }
+                    if pending && queued != 0 {
+                        audit.violation();
+                    }
+                }
+                State::Ready => {
+                    if queued.saturating_add(u8::from(pending)) != 1 {
+                        audit.violation();
+                    }
+                }
+                State::Running => {
+                    running_tasks = running_tasks.saturating_add(1);
+                    if task != self.current || queued != 0 || pending {
+                        audit.violation();
+                    }
+                }
+                State::Free | State::Blocked | State::Sleeping | State::Throttled => {
+                    if queued != 0 || pending {
+                        audit.violation();
+                    }
+                }
+            }
+        }
+
+        if self.started {
+            if let Some(pending) = self.pending_switch {
+                if running_tasks != 0
+                    || self.current != pending.previous.slot
+                    || self.current >= TASK_SLOT_COUNT
+                    || self
+                        .tasks
+                        .get(self.current)
+                        .is_some_and(|task| task.state == State::Running)
+                {
+                    audit.violation();
+                }
+            } else if running_tasks != 1
+                || self.current >= TASK_SLOT_COUNT
+                || self.tasks[self.current].state != State::Running
+            {
+                audit.violation();
+            }
+        }
+
+        audit
     }
 
     pub(super) fn set_effective_priority(&mut self, task: usize, priority: u8) {
@@ -1274,6 +1436,46 @@ mod proofs {
             assert_eq!(scheduler.pending_switch.unwrap().sequence, intent.sequence);
             assert_eq!(scheduler.diagnostics.switch_intents_created, 1);
             assert_eq!(scheduler.diagnostics.switch_intents_committed, 1);
+        }
+    }
+
+    #[kani::proof]
+    fn ready_ownership_audit_detects_invalid_ownership() {
+        let mut scheduler = Sched::new();
+        scheduler.started = true;
+        scheduler.current = 0;
+        scheduler.tasks[0].identity_generation = 1;
+        scheduler.tasks[0].state = State::Running;
+        scheduler.tasks[2].identity_generation = 2;
+        scheduler.tasks[2].state = State::Ready;
+        scheduler.tasks[2].priority = 3;
+        scheduler.ready_push(2);
+
+        let fault = kani::any::<u8>();
+        kani::assume(fault < 5);
+        match fault {
+            0 => {}
+            1 => scheduler.ready_remove(2),
+            2 => {
+                scheduler.ready_remove(2);
+                scheduler.ready_head[4] = 2;
+                scheduler.ready_tail[4] = 2;
+            }
+            3 => scheduler.tasks[2].next = 2,
+            _ => {
+                scheduler.ready_remove(2);
+                scheduler.tasks[0].state = State::Blocked;
+                let intent = scheduler.prepare_switch_intent(0, 2);
+                assert!(scheduler.commit_switch_intent(intent));
+                scheduler.ready_push(2);
+            }
+        }
+
+        let audit = scheduler.ready_ownership_audit();
+        if fault == 0 {
+            assert_eq!(audit.violations, 0);
+        } else {
+            assert_ne!(audit.violations, 0);
         }
     }
 }

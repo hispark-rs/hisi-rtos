@@ -24,6 +24,16 @@ evidence in `requirements.toml`.
   current compatibility profile exposes 15 dynamic slots in addition to these
   two internal slots. The first 15 dynamic allocations succeed when storage is
   otherwise available; the next returns `NoTaskSlots`.
+- **RTOS-STATE-004:** In a stable scheduler snapshot, every non-idle Ready task
+  has exactly one owner: one ordinary ready-queue entry or one unconsumed
+  pending-switch target, never both. A task occurs at most once across all ready
+  queues and its queue bucket equals its effective priority. Non-Ready tasks are
+  owned by neither mechanism; idle is never ordinary-queued. A pending handoff
+  may transiently have no Running task while `current` still identifies the
+  non-running source; outside that handoff exactly one Running task equals
+  `current`. Diagnostics traverse every intrusive queue with a fixed task-table
+  bound and report ownership, duplicate, wrong-bucket, and link violations
+  without trusting the state being audited.
 
 ## Priority And Run Policy
 

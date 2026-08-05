@@ -9,6 +9,8 @@ pub(crate) const ADOPTED_MAIN_TASKS: usize = 1;
 pub(crate) const INTERNAL_IDLE_TASKS: usize = 1;
 /// Dynamic task slots available through the runtime contract.
 pub const DYNAMIC_TASK_CAPACITY: usize = 15;
+/// Sentinel reported when a task is not present in an ordinary ready queue.
+pub const NO_READY_QUEUE_BUCKET: u8 = u8::MAX;
 /// Total scheduler slots, including adopted and internal threads.
 pub(crate) const TASK_SLOT_COUNT: usize =
     ADOPTED_MAIN_TASKS + INTERNAL_IDLE_TASKS + DYNAMIC_TASK_CAPACITY;
@@ -133,6 +135,14 @@ pub struct Diagnostics {
     /// Policy mutations observed while a pending switch ticket exclusively
     /// owned a detached Ready target.
     pub detached_pending_policy_mutations: u32,
+    /// Current stable-snapshot violations of ready/current/pending ownership.
+    pub ready_ownership_violations: u8,
+    /// Ready queue entries that occur more than once across all buckets.
+    pub ready_queue_duplicate_memberships: u8,
+    /// Ready queue entries stored in a bucket other than their effective priority.
+    pub ready_queue_wrong_priorities: u8,
+    /// Invalid links, cycles, or inconsistent ready queue head/tail pairs.
+    pub ready_queue_invalid_links: u8,
     pub time_slice_preemptions: u32,
     pub priority_inheritances: u32,
     pub yields: u32,
@@ -187,6 +197,10 @@ pub struct TaskDiagnostic {
     pub ready_queued: bool,
     /// Whether an unconsumed switch ticket currently owns this task as target.
     pub pending_switch_target: bool,
+    /// Ready queue bucket, or [`NO_READY_QUEUE_BUCKET`] when detached/not ready.
+    pub ready_queue_bucket: u8,
+    /// Number of times this task appears across all ready queues.
+    pub ready_queue_memberships: u8,
     pub entry: usize,
     /// Bytes allocated for this task's stack.
     ///
@@ -243,6 +257,10 @@ impl Diagnostics {
         switch_intents_completed: 0,
         detached_pending_priority_mutations: 0,
         detached_pending_policy_mutations: 0,
+        ready_ownership_violations: 0,
+        ready_queue_duplicate_memberships: 0,
+        ready_queue_wrong_priorities: 0,
+        ready_queue_invalid_links: 0,
         time_slice_preemptions: 0,
         priority_inheritances: 0,
         yields: 0,
