@@ -168,9 +168,9 @@ dependencies = [
 
 [[package]]
 name = "hisi-hal"
-version = "0.7.0-alpha.6"
+version = "0.7.0-alpha.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa948b076893aa7e24d6a48297b53d2cb7f2dac361b933cf87595b61e27a29cd"
+checksum = "b9848afd891f4bc8cfcf65ff087915d80faa613f388762d723db46b14f4ac1ee"
 dependencies = [
  "cfg-if",
  "critical-section",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "hisi-rtos"
-version = "0.1.0-alpha.23"
+version = "0.1.0-alpha.24"
 dependencies = [
  "critical-section",
  "embassy-time-driver",
@@ -541,9 +541,9 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 
 [[package]]
 name = "ws63-pac"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9a4354ec80cc077cd8ed605f940776d63e8d5b34fb41a80893ebea12d38cee0"
+checksum = "af8cbb3cb137ab78b49cae308311b3dacc320f16fbe023db2c9779fa49d7313e"
 dependencies = [
  "critical-section",
  "riscv",
