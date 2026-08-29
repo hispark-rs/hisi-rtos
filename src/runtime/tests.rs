@@ -221,6 +221,27 @@ fn heterogeneous_resource_groups() -> [TaskResourceGroupRequirements; 2] {
     ]
 }
 
+fn coexistence_resource_groups() -> [TaskResourceGroupRequirements; 6] {
+    let group = |owner, slots, stack| {
+        TaskResourceGroupRequirements::new(
+            TaskResourceOwner::new(NonZeroU32::new(owner).unwrap()),
+            TaskResourceRequirements::new(
+                NonZeroUsize::new(slots).unwrap(),
+                NonZeroUsize::new(stack).unwrap(),
+            )
+            .unwrap(),
+        )
+    };
+    [
+        group(1, 7, 24 * 1024),
+        group(2, 1, 8 * 1024),
+        group(3, 1, 3_584),
+        group(4, 1, 2_048),
+        group(5, 1, 512),
+        group(6, 1, 4_096),
+    ]
+}
+
 #[test]
 fn heterogeneous_resource_plan_reserves_children_in_plan_order() {
     let mut scheduler = Sched::new();
@@ -254,6 +275,48 @@ fn heterogeneous_resource_plan_reserves_children_in_plan_order() {
         scheduler.release_task_reservation(&worker).unwrap().count,
         1
     );
+    assert_eq!(scheduler.diagnostics().dynamic_reserved, 0);
+}
+
+#[test]
+fn coexistence_resource_plan_reserves_six_exact_groups_atomically() {
+    let mut scheduler = Sched::new();
+    let groups = coexistence_resource_groups();
+    let plan = TaskResourcePlan::new(&groups).unwrap();
+    assert_eq!(plan.total_task_slots(), 12);
+    assert_eq!(plan.total_stack_bytes(), 7 * 24 * 1024 + 8 * 1024 + 10_240);
+
+    let mut stacks = [[0usize; DYNAMIC_TASK_CAPACITY]; TASK_RESOURCE_GROUP_CAPACITY];
+    let mut address = 0x1000usize;
+    for (stack_group, group) in stacks.iter_mut().zip(groups.iter()) {
+        for stack in stack_group
+            .iter_mut()
+            .take(group.resources().task_slots().get())
+        {
+            *stack = address;
+            address += 0x1000;
+        }
+    }
+
+    let mut batch = scheduler
+        .reserve_dynamic_task_resource_plan_with_capacity(plan, stacks, DYNAMIC_TASK_CAPACITY)
+        .unwrap();
+    assert_eq!(batch.len(), 6);
+    assert_eq!(scheduler.diagnostics().dynamic_reserved, 12);
+    for (index, group) in groups.iter().enumerate() {
+        let reservation = batch.take(index).unwrap();
+        assert_eq!(
+            scheduler.reservation_stack_size(&reservation),
+            Ok(Some(group.resources().stack_bytes_per_task().get()))
+        );
+        assert_eq!(
+            scheduler
+                .release_task_reservation(&reservation)
+                .unwrap()
+                .count,
+            group.resources().task_slots().get()
+        );
+    }
     assert_eq!(scheduler.diagnostics().dynamic_reserved, 0);
 }
 

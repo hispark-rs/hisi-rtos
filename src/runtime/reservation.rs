@@ -1,6 +1,9 @@
 use super::*;
 
-const RESERVATION_SLOT_COUNT: usize = 4;
+// Keep one runtime reservation slot for every group admitted by the public
+// driver contract. This bounds metadata without preventing an exact
+// heterogeneous Wi-Fi plus BGLE resource plan.
+const RESERVATION_SLOT_COUNT: usize = hisi_rf_rtos_driver::TASK_RESOURCE_GROUP_CAPACITY;
 const RESERVATION_SLOT_BITS: u32 = 8;
 const RESERVATION_SLOT_MASK: u32 = (1 << RESERVATION_SLOT_BITS) - 1;
 
