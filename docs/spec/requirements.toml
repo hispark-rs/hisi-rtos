@@ -49,7 +49,7 @@ host_tests = ["tests::cooperative_task_is_not_preempted_by_irq_but_can_yield", "
 
 [[requirement]]
 id = "RTOS-SCHED-003"
-implementation = ["src/runtime/time.rs:next_time_slice_deadline", "src/runtime/scheduler.rs:take_reschedule_target"]
+implementation = ["src/runtime/scheduler.rs:Sched::next_time_slice_deadline", "src/runtime/scheduler.rs:take_reschedule_target"]
 host_tests = ["tests::expired_time_slice_round_robins_equal_priority_tasks", "tests::unrelated_deadline_rearm_does_not_postpone_time_slice"]
 hil = ["A3_RTOS_PREEMPTION_OK"]
 
@@ -268,6 +268,6 @@ kani = "runtime::time::proofs::stale_timer_rearm_ticket_cannot_validate_after_ne
 
 [[requirement]]
 id = "RTOS-CONTEXT-001"
-implementation = ["src/context.rs:TaskContext", "src/context.rs:context_switch"]
+implementation = ["src/context.rs:TaskContext", "src/context.rs:cooperative_context_switch_fallback"]
 host_tests = []
 hil = ["A3_RTOS_PREEMPTION_OK"]

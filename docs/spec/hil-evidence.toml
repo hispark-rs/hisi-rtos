@@ -1,4 +1,4 @@
-schema = 1
+schema = 2
 
 [[evidence]]
 marker = "A3_RTOS_PREEMPTION_OK"
@@ -7,8 +7,17 @@ date = "2026-07-17"
 result = "pass"
 successful_runs = 20
 reset_mode = "J-Link nRST without reflashing"
+profile = "rtos-preemption-idle-wake"
+claim_scope = "single-hart TIMER_INT0/SOFT_INT0 preemption, idle timed wake, and FPR/FCSR preservation"
+binding = "exact-firmware"
 parent_commit = "e460bbb17d21bbc17e0111548db40fac775ef44f"
+runtime_commit = "2024e6251479de5c863172c2a6ffe50c80709aa3"
 evidence_url = "https://github.com/hispark-rs/hisi-riscv-rs/blob/e460bbb17d21bbc17e0111548db40fac775ef44f/docs/plan/evidence/ws63-rf-a3-unified-context-2026-07-14.md"
+artifacts = [
+  { kind = "firmware-elf", name = "rtos_preemption", sha256 = "55c047b947912e6e6aea8019da9da87a1c2917b5a3e1940a0a6fd6b3af06d235" },
+  { kind = "flash-image", name = "rtos_preemption.hisi.img", sha256 = "585a405c25910735fbb849f34ec69636c0d7e0a894bf4419af55090f44f3139f" },
+  { kind = "flash-plan", name = "rtos_preemption.plan.json", sha256 = "d893afe84dc5230ab3d7e8ae38beb016cc096d080b64bbbc67fca1ebfdf65a98" },
+]
 
 [[evidence]]
 marker = "A3_RTOS_BUDGET_OK"
@@ -17,7 +26,12 @@ date = "2026-07-14"
 result = "pass"
 successful_runs = 1
 reset_mode = "J-Link nRST after verified download"
+profile = "a3-task-capacity-and-budget"
+claim_scope = "budget marker and current 15-dynamic-task compatibility capacity"
+binding = "legacy-no-firmware-hash"
+limitation = "the immutable evidence page records counters and the parent closure but not the tested ELF SHA-256; rerun before using this marker for stable graduation"
 parent_commit = "013500573641fa2b3068b7e712a53b94d790d783"
+runtime_commit = "82ff203706e88b84cac0b4270fde8f5734f6bb03"
 evidence_url = "https://github.com/hispark-rs/hisi-riscv-rs/blob/013500573641fa2b3068b7e712a53b94d790d783/docs/plan/evidence/ws63-rf-a3-task-capacity-2026-07-14.md"
 
 [[evidence]]
@@ -27,8 +41,16 @@ date = "2026-07-28"
 result = "pass"
 successful_runs = 20
 reset_mode = "J-Link nRST without reflashing"
+profile = "a5r-resource-lifecycle-scheduler-stress"
+claim_scope = "scheduler stress marker in the resource-lifecycle fixture"
+binding = "legacy-no-firmware-hash"
+limitation = "the immutable evidence page records a UART-capture hash but not the tested firmware ELF SHA-256"
 parent_commit = "4d355dc89d8d3ec1478eb6252d93ec92a5a5954d"
+runtime_commit = "1a7aecba7809fefa2f42f1d1505661ad1565a8c1"
 evidence_url = "https://github.com/hispark-rs/hisi-riscv-rs/blob/4d355dc89d8d3ec1478eb6252d93ec92a5a5954d/docs/plan/evidence/ws63-rtos-a5r-resource-lifecycle-2026-07-28.md"
+artifacts = [
+  { kind = "uart-capture", name = "byte-identical-20-run-capture", sha256 = "2724389a28caddea7b45da611a42225d6908e098e2011f911da756ee5086cc4f" },
+]
 
 [[evidence]]
 marker = "A5R_READY_OWNERSHIP_OK"
@@ -37,8 +59,16 @@ date = "2026-08-06"
 result = "pass"
 successful_runs = 20
 reset_mode = "paired J-Link nRST without reflashing"
+profile = "pure-wpa3-softap-sta-ready-ownership-alpha24"
+claim_scope = "bounded ready-queue ownership audit under paired pure-WPA3 SoftAP/STA load"
+binding = "exact-firmware"
 parent_commit = "71557ee3720ecb8e98828d7ffd71c9ba13a8f662"
+runtime_commit = "eb93dbe0e53675ffaddd9c54f580ee161f2e8cc6"
 evidence_url = "https://github.com/hispark-rs/hisi-riscv-rs/blob/71557ee3720ecb8e98828d7ffd71c9ba13a8f662/docs/plan/evidence/ws63-rtos-ready-ownership-2026-08-06.md"
+artifacts = [
+  { kind = "firmware-elf", name = "pure-wpa3-softap-ready-ownership-alpha24", sha256 = "9dd4ac6983137a380ab2017597aab00a06ea8d48cd6d0b6f96c53339c4a78ad0" },
+  { kind = "firmware-elf", name = "pure-wpa3-sta-ready-ownership-alpha24", sha256 = "df0dc0f6c4ba20c590506900e887fe045cd54721f640bc638d764984415dbb25" },
+]
 
 [[evidence]]
 marker = "A3_PRIORITY_INHERITANCE_OK"
@@ -47,7 +77,12 @@ date = "2026-07-14"
 result = "pass"
 successful_runs = 3
 reset_mode = "J-Link nRST after verified download"
+profile = "rtos-priority-inheritance"
+claim_scope = "classic low/medium/high priority inversion and recursive mutex handoff"
+binding = "legacy-no-firmware-hash"
+limitation = "the immutable evidence page records the scenario and markers but not the tested ELF SHA-256"
 parent_commit = "0144ebc6d26a6e50c8370674f04ea771ffd94187"
+runtime_commit = "24e63e7efc25dca21876022577ec19dfa7ceb874"
 evidence_url = "https://github.com/hispark-rs/hisi-riscv-rs/blob/0144ebc6d26a6e50c8370674f04ea771ffd94187/docs/plan/evidence/ws63-rf-a3-priority-inheritance-2026-07-14.md"
 
 [[evidence]]
@@ -57,7 +92,12 @@ date = "2026-07-14"
 result = "pass"
 successful_runs = 3
 reset_mode = "J-Link nRST after verified download"
+profile = "rtos-embassy-coexist"
+claim_scope = "one native task and Embassy executor sharing scheduler and TIMER_INT0"
+binding = "legacy-no-firmware-hash"
+limitation = "the immutable evidence page records commands and counters but not the tested ELF SHA-256"
 parent_commit = "ec6eb369afd8b2725101faa0dc6493bf739c9ff5"
+runtime_commit = "82ff203706e88b84cac0b4270fde8f5734f6bb03"
 evidence_url = "https://github.com/hispark-rs/hisi-riscv-rs/blob/ec6eb369afd8b2725101faa0dc6493bf739c9ff5/docs/plan/evidence/ws63-rf-a3-embassy-coexistence-2026-07-14.md"
 
 [[evidence]]
@@ -67,5 +107,13 @@ date = "2026-07-28"
 result = "pass"
 successful_runs = 20
 reset_mode = "J-Link nRST without reflashing"
+profile = "a5r-resource-lifecycle-scheduler-stress"
+claim_scope = "stale and duplicate handles, destroy rejection, cancellation after grant, and task identity reuse"
+binding = "legacy-no-firmware-hash"
+limitation = "the immutable evidence page records a UART-capture hash but not the tested firmware ELF SHA-256"
 parent_commit = "4d355dc89d8d3ec1478eb6252d93ec92a5a5954d"
+runtime_commit = "1a7aecba7809fefa2f42f1d1505661ad1565a8c1"
 evidence_url = "https://github.com/hispark-rs/hisi-riscv-rs/blob/4d355dc89d8d3ec1478eb6252d93ec92a5a5954d/docs/plan/evidence/ws63-rtos-a5r-resource-lifecycle-2026-07-28.md"
+artifacts = [
+  { kind = "uart-capture", name = "byte-identical-20-run-capture", sha256 = "2724389a28caddea7b45da611a42225d6908e098e2011f911da756ee5086cc4f" },
+]

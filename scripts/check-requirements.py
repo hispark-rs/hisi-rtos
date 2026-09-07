@@ -8,20 +8,27 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import tomllib
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(
+    os.environ.get("HISI_RTOS_REQUIREMENTS_ROOT", Path(__file__).resolve().parents[1])
+).resolve()
 MANIFEST = ROOT / "docs/spec/requirements.toml"
 HIL_EVIDENCE_MANIFEST = ROOT / "docs/spec/hil-evidence.toml"
 CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 EVIDENCE_KEYS = ("host_tests", "kani", "tla", "hil")
 HIL_MARKER = re.compile(r"^(?:A3|A5R)_[A-Z0-9_]+$")
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+ARTIFACT_SHA = re.compile(r"^[0-9a-f]{64}$")
 EVIDENCE_DATE = re.compile(r"^20[0-9]{2}-[0-9]{2}-[0-9]{2}$")
+EXACT_HIL_BINDING = "exact-firmware"
+LEGACY_HIL_BINDING = "legacy-no-firmware-hash"
 
 
 def fail(message: str) -> None:
@@ -44,13 +51,40 @@ def source_corpus() -> dict[str, str]:
     }
 
 
-def reference_exists(reference: str, corpus: dict[str, str]) -> bool:
+def strip_rust_comments(text: str) -> str:
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    return re.sub(r"//[^\n]*", "", text)
+
+
+def definition_pattern(symbol: str) -> re.Pattern[str]:
+    leaf = re.escape(symbol.split("::")[-1])
+    return re.compile(
+        rf"^(?:\s*#\[[^\n]+\]\s*)*\s*(?:(?:pub(?:\([^)]*\))?|unsafe|async|const|extern\s+\"[^\"]+\")\s+)*"
+        rf"(?:fn|struct|enum|trait|type|const|static|mod)\s+{leaf}\b"
+        rf"|^\s*(?:pub(?:\([^)]*\))?\s+)?{leaf}\s*(?::|\(|\{{|=|,)",
+        re.MULTILINE,
+    )
+
+
+def reference_definitions(reference: str, corpus: dict[str, str]) -> list[str]:
     path, separator, symbol = reference.partition(":")
     if separator and path.endswith(".rs"):
         text = corpus.get(path)
-        return text is not None and symbol.split("::")[-1] in text
-    leaf = reference.split("::")[-1]
-    return any(leaf in text for text in corpus.values())
+        if text is None:
+            return []
+        return [path] if definition_pattern(symbol).search(strip_rust_comments(text)) else []
+    if not separator and reference.endswith(".rs"):
+        return [reference] if reference in corpus else []
+    pattern = definition_pattern(reference)
+    return [
+        source_path
+        for source_path, text in corpus.items()
+        if pattern.search(strip_rust_comments(text))
+    ]
+
+
+def reference_exists(reference: str, corpus: dict[str, str]) -> bool:
+    return bool(reference_definitions(reference, corpus))
 
 
 def validate_tla(reference: str, workflow: str) -> None:
@@ -72,10 +106,38 @@ def validate_tla(reference: str, workflow: str) -> None:
 
 def validate_kani(reference: str, corpus: dict[str, str], workflow: str) -> None:
     harness = reference.split("::")[-1]
-    if not reference_exists(reference, corpus):
+    locations = reference_definitions(reference, corpus)
+    if not locations:
         fail(f"Kani reference uses missing harness {reference}")
+    proof_pattern = re.compile(
+        rf"#\[kani::proof\]\s*(?:#\[[^\n]+\]\s*)*[^{{;]*\bfn\s+{re.escape(harness)}\b",
+        re.DOTALL,
+    )
+    if not any(
+        proof_pattern.search(strip_rust_comments(corpus[source_path]))
+        for source_path in locations
+    ):
+        fail(f"Kani reference is not annotated as a proof harness: {reference}")
     if f"--harness {harness}" not in workflow:
         fail(f"Kani harness is not executed by CI: {reference}")
+
+
+def validate_host_test(reference: str, corpus: dict[str, str]) -> None:
+    locations = reference_definitions(reference, corpus)
+    if not locations:
+        fail(f"host test reference uses missing definition {reference}")
+    if reference.endswith(".rs"):
+        return
+    test = reference.split("::")[-1]
+    test_pattern = re.compile(
+        rf"#\[test\]\s*(?:#\[[^\n]+\]\s*)*[^{{;]*\bfn\s+{re.escape(test)}\b",
+        re.DOTALL,
+    )
+    if not any(
+        test_pattern.search(strip_rust_comments(corpus[source_path]))
+        for source_path in locations
+    ):
+        fail(f"host test reference is not annotated #[test]: {reference}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -88,10 +150,30 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def validate_artifacts(marker: str, artifacts: object) -> list[dict[str, str]]:
+    if not isinstance(artifacts, list) or not artifacts:
+        fail(f"{marker} must list at least one artifact")
+    normalized: list[dict[str, str]] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            fail(f"{marker} contains a non-table artifact")
+        kind = artifact.get("kind")
+        name = artifact.get("name")
+        sha256 = artifact.get("sha256")
+        if not isinstance(kind, str) or not kind:
+            fail(f"{marker} artifact has no kind")
+        if not isinstance(name, str) or not name:
+            fail(f"{marker} artifact has no name")
+        if not isinstance(sha256, str) or ARTIFACT_SHA.fullmatch(sha256) is None:
+            fail(f"{marker} artifact {name!r} has invalid SHA-256")
+        normalized.append({"kind": kind, "name": name, "sha256": sha256})
+    return normalized
+
+
 def load_hil_evidence() -> dict[str, dict[str, object]]:
     manifest = tomllib.loads(HIL_EVIDENCE_MANIFEST.read_text())
-    if manifest.get("schema") != 1:
-        fail("hil-evidence.toml must use schema 1")
+    if manifest.get("schema") != 2:
+        fail("hil-evidence.toml must use schema 2")
     entries = manifest.get("evidence", [])
     if not isinstance(entries, list):
         fail("hil-evidence.toml evidence entries are not an array")
@@ -134,6 +216,43 @@ def load_hil_evidence() -> dict[str, dict[str, object]]:
             expected_prefix
         ):
             fail(f"{marker} evidence_url must use its immutable parent commit")
+        profile = entry.get("profile")
+        if not isinstance(profile, str) or not profile:
+            fail(f"{marker} has no tested profile")
+        claim_scope = entry.get("claim_scope")
+        if not isinstance(claim_scope, str) or not claim_scope:
+            fail(f"{marker} has no bounded claim_scope")
+        binding = entry.get("binding")
+        if binding not in (EXACT_HIL_BINDING, LEGACY_HIL_BINDING):
+            fail(f"{marker} has invalid evidence binding {binding!r}")
+        artifacts_value = entry.get("artifacts")
+        artifacts = (
+            validate_artifacts(marker, artifacts_value)
+            if artifacts_value is not None
+            else []
+        )
+        runtime_commit = entry.get("runtime_commit")
+        if binding == EXACT_HIL_BINDING:
+            if (
+                not isinstance(runtime_commit, str)
+                or COMMIT_SHA.fullmatch(runtime_commit) is None
+            ):
+                fail(f"{marker} exact evidence has invalid runtime_commit")
+            if not artifacts:
+                fail(f"{marker} exact evidence must list artifacts")
+            if not any(artifact["kind"] == "firmware-elf" for artifact in artifacts):
+                fail(f"{marker} exact evidence has no firmware-elf artifact")
+            if "limitation" in entry:
+                fail(f"{marker} exact evidence must not carry a legacy limitation")
+        else:
+            limitation = entry.get("limitation")
+            if not isinstance(limitation, str) or not limitation:
+                fail(f"{marker} legacy evidence must explain its limitation")
+            if runtime_commit is not None and (
+                not isinstance(runtime_commit, str)
+                or COMMIT_SHA.fullmatch(runtime_commit) is None
+            ):
+                fail(f"{marker} legacy evidence has invalid runtime_commit")
         evidence_by_marker[marker] = entry
     return evidence_by_marker
 
@@ -166,6 +285,13 @@ def main() -> None:
 
     corpus = source_corpus()
     workflow = CI_WORKFLOW.read_text()
+    for command in (
+        "scripts/proof-evidence.py contract",
+        "scripts/proof-evidence.py record-kani",
+        "scripts/proof-evidence.py record-tla",
+    ):
+        if command not in workflow:
+            fail(f"CI does not emit required proof evidence: {command}")
     kani_versions = set(re.findall(r'kani-version:\s*"([^"]+)"', workflow))
     if len(kani_versions) != 1:
         fail(f"CI must pin exactly one Kani version, found {sorted(kani_versions)}")
@@ -192,8 +318,7 @@ def main() -> None:
         if not isinstance(host_tests, list):
             fail(f"{requirement_id} host_tests must be an array")
         for reference in host_tests:
-            if not reference_exists(reference, corpus):
-                fail(f"{requirement_id} references missing host test {reference}")
+            validate_host_test(reference, corpus)
 
         tla_value = entry.get("tla", "")
         if tla_value and not isinstance(tla_value, str):
@@ -219,11 +344,27 @@ def main() -> None:
                 fail(f"{requirement_id} has no immutable HIL evidence for {marker}")
             referenced_hil_markers.add(marker)
 
+        hil_records = [hil_evidence[marker] for marker in hil]
+        hil_binding = (
+            "exact"
+            if hil_records
+            and all(item["binding"] == EXACT_HIL_BINDING for item in hil_records)
+            else "legacy"
+            if hil_records
+            else "not-required"
+        )
         inventory.append(
             {
                 "id": requirement_id,
                 "status": entry.get(
-                    "status", "hil-required" if hil else "software-evidence"
+                    "status",
+                    (
+                        "hil-evidence-exact"
+                        if hil_binding == "exact"
+                        else "hil-evidence-legacy"
+                        if hil_binding == "legacy"
+                        else "software-evidence"
+                    ),
                 ),
                 "implementation": implementations,
                 "host_tests": host_tests,
@@ -233,7 +374,8 @@ def main() -> None:
                     kani_value if kani_value.startswith("NotApplicable:") else None
                 ),
                 "hil": hil,
-                "hil_evidence": [hil_evidence[marker] for marker in hil],
+                "hil_binding": hil_binding,
+                "hil_evidence": hil_records,
             }
         )
 
@@ -247,6 +389,16 @@ def main() -> None:
 
     report = {
         "schema": manifest.get("schema"),
+        "evidence_scope": "contract-map",
+        "evidence_scope_note": (
+            "This inventory validates mappings and immutable references; Kani and "
+            "TLA+ run manifests are emitted only by their completed CI jobs."
+        ),
+        "source_corpus_sha256": hashlib.sha256(
+            "".join(
+                f"{path}\0{corpus[path]}\0" for path in sorted(corpus)
+            ).encode()
+        ).hexdigest(),
         "normative_spec": normative_spec,
         "verification": {
             "kani": {
@@ -277,9 +429,22 @@ def main() -> None:
             "software_evidence": sum(
                 item["status"] == "software-evidence" for item in inventory
             ),
-            "hil_required": sum(item["status"] == "hil-required" for item in inventory),
+            "hil_evidence_exact": sum(
+                item["status"] == "hil-evidence-exact" for item in inventory
+            ),
+            "hil_evidence_legacy": sum(
+                item["status"] == "hil-evidence-legacy" for item in inventory
+            ),
             "hil_markers": len(referenced_hil_markers),
             "hil_markers_with_evidence": len(hil_evidence),
+            "hil_markers_exact": sum(
+                item["binding"] == EXACT_HIL_BINDING
+                for item in hil_evidence.values()
+            ),
+            "hil_markers_legacy": sum(
+                item["binding"] == LEGACY_HIL_BINDING
+                for item in hil_evidence.values()
+            ),
         },
     }
     if args.report is not None:
@@ -290,8 +455,10 @@ def main() -> None:
 
     print(
         f"requirements: {len(inventory)} IDs aligned with {normative_spec}; "
-        f"{report['summary']['hil_required']} require HIL; "
-        f"{len(hil_evidence)} immutable marker records"
+        f"{report['summary']['hil_evidence_exact']} exact-HIL and "
+        f"{report['summary']['hil_evidence_legacy']} legacy-HIL requirements; "
+        f"{report['summary']['hil_markers_exact']}/{len(hil_evidence)} marker "
+        "records bind exact firmware"
     )
 
 

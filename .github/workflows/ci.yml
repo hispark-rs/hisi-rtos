@@ -18,11 +18,17 @@ jobs:
       - run: cargo fmt --all -- --check
       - name: Validate and inventory requirement evidence
         run: uv run --script scripts/check-requirements.py --report target/evidence/requirements.json
-      - name: Upload requirement evidence inventory
+      - name: Exercise negative evidence contracts
+        run: uv run --script scripts/test-requirement-evidence.py
+      - name: Build proof contract
+        run: uv run --script scripts/proof-evidence.py contract --output target/evidence/proof-contract.json
+      - name: Upload requirement and proof contracts
         uses: actions/upload-artifact@v4
         with:
-          name: requirement-evidence
-          path: target/evidence/requirements.json
+          name: requirement-evidence-contract
+          path: |
+            target/evidence/requirements.json
+            target/evidence/proof-contract.json
       - run: cargo test --locked --target x86_64-unknown-linux-gnu
       - run: cargo clippy -Zbuild-std=core --target riscv32imfc-unknown-none-elf -- -D warnings
       - run: cargo build -Zbuild-std=core --target riscv32imfc-unknown-none-elf
@@ -100,11 +106,27 @@ jobs:
         with:
           kani-version: "0.67.0"
           args: "--harness stale_timer_rearm_ticket_cannot_validate_after_new_claim"
+      - uses: astral-sh/setup-uv@v6
+      - name: Bind completed Kani run to the source contract
+        run: |
+          uv run --script scripts/proof-evidence.py contract \
+            --output target/evidence/proof-contract.json
+          uv run --script scripts/proof-evidence.py record-kani \
+            --contract target/evidence/proof-contract.json \
+            --output target/evidence/kani-run.json
+      - name: Upload completed Kani proof evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: kani-proof-evidence
+          path: |
+            target/evidence/proof-contract.json
+            target/evidence/kani-run.json
 
   tla:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
       - name: Download pinned TLA+ tools
         run: |
           curl --fail --location --silent --show-error \
@@ -179,9 +201,20 @@ jobs:
           test "$rc" -ne 0
           grep -F "Invariant PreparedSourceNotResumed is violated" \
             ../target/evidence/tla/SwitchIntentCreationLegacy.log
+      - name: Bind completed TLA+ runs to the source contract
+        run: |
+          uv run --script scripts/proof-evidence.py contract \
+            --output target/evidence/proof-contract.json
+          uv run --script scripts/proof-evidence.py record-tla \
+            --contract target/evidence/proof-contract.json \
+            --logs target/evidence/tla \
+            --output target/evidence/tla-run.json
       - name: Upload TLA+ state-space evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tla-state-space-evidence
-          path: target/evidence/tla
+          path: |
+            target/evidence/proof-contract.json
+            target/evidence/tla-run.json
+            target/evidence/tla

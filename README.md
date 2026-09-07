@@ -94,7 +94,10 @@ The normative scheduler contract and machine-readable evidence map live in
 [`docs/spec/requirements.toml`](docs/spec/requirements.toml). Executable TLA+
 models under `spec/` cover periodic CPU quota, resource/wait lifecycle, wait
 linearization, bounded priority inheritance, timer re-arm generation, and
-switch-intent ownership. CI validates every implementation, host-test, TLA+,
-Kani, and HIL-marker reference, then publishes a JSON requirement inventory and
-the complete TLA+ state-space logs as build artifacts. A requirement carrying a
-HIL marker remains `hil-required`; software evidence never silently graduates it.
+switch-intent ownership. CI publishes three deliberately distinct evidence
+layers: a requirement mapping inventory, completed Kani/TLA+ run manifests bound
+to the exact source-tree and model hashes, and immutable HIL records. HIL records
+marked `exact-firmware` bind the runtime commit and tested ELF SHA-256; older
+records that omitted a firmware hash remain explicitly
+`legacy-no-firmware-hash` and cannot be used to graduate a stable claim without
+a rerun. Mapping validation alone is never reported as a completed proof run.
