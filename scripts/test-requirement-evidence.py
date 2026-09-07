@@ -8,18 +8,19 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import importlib.util
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.dont_write_bytecode = True
 CHECKER = ROOT / "scripts/check-requirements.py"
 PROOF = ROOT / "scripts/proof-evidence.py"
 TEST_COMMIT = "1" * 40
@@ -32,6 +33,7 @@ def fixture() -> Path:
     (root / "scripts").mkdir()
     shutil.copy2(CHECKER, root / "scripts/check-requirements.py")
     shutil.copy2(PROOF, root / "scripts/proof-evidence.py")
+    shutil.copy2(ROOT / "scripts/verify-hil-bundle.py", root / "scripts/verify-hil-bundle.py")
     for name in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml"):
         shutil.copy2(ROOT / name, root / name)
     return root
@@ -253,7 +255,8 @@ def test_hil_bundle_checks_bytes_and_identity() -> None:
         identity = {"runtime_commit": TEST_COMMIT, "parent_commit": "2" * 40,
                     "profile": "test-only", "marker": "TEST_ONLY"}
         summary = dict(identity, successful_runs=1, failed_runs=0,
-                       firmware_sha256=[module.digest(root / "firmware.elf")])
+                       firmware_sha256=[module.digest(root / "firmware.elf")],
+                       runs=[{"id": 1, "result": "pass", "uart_files": ["uart.log"]}])
         (root / "summary.json").write_text(json.dumps(summary))
         artifacts = [{"name": name, "kind": kind, "sha256": module.digest(root / name)}
                      for name, kind in (("firmware.elf", "firmware-elf"), ("uart.log", "uart-capture"), ("summary.json", "summary"))]

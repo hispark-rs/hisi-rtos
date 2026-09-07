@@ -67,6 +67,8 @@ def source_files() -> list[Path]:
         ROOT / "Cargo.toml",
         ROOT / "Cargo.lock",
         ROOT / "rust-toolchain.toml",
+        ROOT / "docs/spec/scheduling.md",
+        ROOT / "scripts/verify-hil-bundle.py",
         REQUIREMENTS,
         ROOT / "docs/spec/hil-evidence.toml",
         WORKFLOW,
@@ -78,6 +80,7 @@ def source_files() -> list[Path]:
             files.extend(directory.rglob(pattern))
     files.extend((ROOT / "spec").glob("*.tla"))
     files.extend((ROOT / "spec").glob("*.cfg"))
+    files.extend(path for path in (ROOT / "build.rs", ROOT / ".cargo/config.toml") if path.is_file())
     return sorted(set(files))
 
 

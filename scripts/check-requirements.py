@@ -325,6 +325,8 @@ def main() -> None:
     inventory = []
     for entry in requirements:
         requirement_id = entry["id"]
+        if "status" in entry and entry["status"] not in ("pending", "pending-hil", "deferred"):
+            fail(f"{requirement_id} cannot override a derived evidence status")
         if not any(key in entry for key in (*EVIDENCE_KEYS, "status")):
             fail(f"{requirement_id} has no evidence or explicit pending status")
 

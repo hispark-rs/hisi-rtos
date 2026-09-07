@@ -36,6 +36,7 @@ def verify(root: Path, expected_manifest: str, expected_runtime: str) -> dict:
     artifacts = manifest.get("artifacts", [])
     seen, kinds = set(), set()
     elf_hashes = []
+    uart_files = set()
     summary = None
     for artifact in artifacts:
         name = artifact["name"]
@@ -54,6 +55,8 @@ def verify(root: Path, expected_manifest: str, expected_runtime: str) -> dict:
             if summary is not None:
                 raise ValueError("multiple summaries")
             summary = json.loads(path.read_text())
+        elif artifact["kind"] == "uart-capture":
+            uart_files.add(name)
     if not {"firmware-elf", "summary", "uart-capture"} <= kinds:
         raise ValueError("bundle lacks firmware/summary/raw UART evidence")
     if any(summary.get(key) != manifest[key] for key in identity_keys):
@@ -62,6 +65,19 @@ def verify(root: Path, expected_manifest: str, expected_runtime: str) -> dict:
         raise ValueError("summary firmware identity mismatch")
     if summary.get("failed_runs") != 0 or summary.get("successful_runs", 0) < 1:
         raise ValueError("summary does not meet declared pass gate")
+    runs = summary.get("runs", [])
+    if len(runs) != summary["successful_runs"] or len({run["id"] for run in runs}) != len(runs):
+        raise ValueError("summary run count/identity mismatch")
+    consumed = set()
+    for run in runs:
+        names = set(run.get("uart_files", []))
+        if run.get("result") != "pass" or not names or not names <= uart_files or names & consumed:
+            raise ValueError("run lacks unique verified raw captures")
+        consumed.update(names)
+        if not any(manifest["marker"] in (root / name).read_text(errors="replace") for name in names):
+            raise ValueError("run raw captures lack the declared HIL marker")
+    if consumed != uart_files:
+        raise ValueError("raw captures not accounted for in run summary")
     return {"schema": 1, "binding": "artifact-verified", "manifest_sha256": expected_manifest,
             "runtime_commit": expected_runtime, "artifacts": artifacts,
             "scope": "downloaded byte integrity and identity, not independent silicon execution"}
