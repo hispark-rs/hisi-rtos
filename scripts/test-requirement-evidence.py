@@ -46,6 +46,9 @@ def proof_env(root: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["HISI_RTOS_PROOF_ROOT"] = str(root)
     env["HISI_RTOS_SOURCE_COMMIT"] = TEST_COMMIT
+    env["GITHUB_SHA"] = TEST_COMMIT
+    env["GITHUB_RUN_ID"] = "fixture"
+    env["GITHUB_RUN_ATTEMPT"] = "1"
     return env
 
 
