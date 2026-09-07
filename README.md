@@ -97,7 +97,23 @@ linearization, bounded priority inheritance, timer re-arm generation, and
 switch-intent ownership. CI publishes three deliberately distinct evidence
 layers: a requirement mapping inventory, completed Kani/TLA+ run manifests bound
 to the exact source-tree and model hashes, and immutable HIL records. HIL records
-marked `exact-firmware` bind the runtime commit and tested ELF SHA-256; older
+marked `declared-firmware` record the runtime commit and tested ELF SHA-256, but
+have not reverified the historical artifact bytes. They are not artifact-verified;
+older
 records that omitted a firmware hash remain explicitly
 `legacy-no-firmware-hash` and cannot be used to graduate a stable claim without
 a rerun. Mapping validation alone is never reported as a completed proof run.
+
+`scripts/proof-evidence.py run-kani/run-tla` executes the exact contracted set,
+retaining per-item command, exit code, tool version, model/config/source digest,
+duration and raw log hash. The recording step rejects skipped, stale, incomplete
+or failed receipts. Kani bounds remain in the hashed production harness source;
+TLC finite constants and enabled invariants remain in the hashed configuration.
+These are bounded safety proofs, not unbounded liveness or RF reliability proofs.
+
+For new downloadable HIL bundles, `scripts/verify-hil-bundle.py` checks a separately
+pinned manifest SHA-256 and runtime commit against ELF, summary and raw UART
+bytes. Its `artifact-verified` receipt means byte integrity and identity binding,
+not independent proof that a physical test occurred. Archive the bundle in an
+immutable release/CI artifact and pin its manifest digest in the evidence review.
+Do not upgrade historical declared records without the actual matching bundle.

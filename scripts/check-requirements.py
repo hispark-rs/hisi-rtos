@@ -27,7 +27,7 @@ HIL_MARKER = re.compile(r"^(?:A3|A5R)_[A-Z0-9_]+$")
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 ARTIFACT_SHA = re.compile(r"^[0-9a-f]{64}$")
 EVIDENCE_DATE = re.compile(r"^20[0-9]{2}-[0-9]{2}-[0-9]{2}$")
-EXACT_HIL_BINDING = "exact-firmware"
+DECLARED_HIL_BINDING = "declared-firmware"
 LEGACY_HIL_BINDING = "legacy-no-firmware-hash"
 
 
@@ -100,7 +100,26 @@ def validate_tla(reference: str, workflow: str) -> None:
     config_path = model_path.with_suffix(".cfg")
     if not config_path.is_file():
         fail(f"TLA model has no config {model}")
-    if model_path.name not in workflow or config_path.name not in workflow:
+    config = re.sub(r"\\\*[^\n]*", "", config_path.read_text())
+    enabled = []
+    collecting = False
+    directives = {"INIT", "NEXT", "SPECIFICATION", "CONSTANT", "CONSTANTS", "PROPERTY",
+                  "PROPERTIES", "CONSTRAINT", "CONSTRAINTS", "CHECK_DEADLOCK",
+                  "SYMMETRY", "VIEW", "ACTION_CONSTRAINT", "ALIAS"}
+    for line in config.splitlines():
+        tokens = line.split()
+        if not tokens:
+            continue
+        if tokens[0] in ("INVARIANT", "INVARIANTS"):
+            collecting = True
+            enabled.extend(tokens[1:])
+        elif tokens[0] in directives:
+            collecting = False
+        elif collecting:
+            enabled.extend(tokens)
+    if invariant not in enabled:
+        fail(f"TLA invariant is not enabled in config: {reference}")
+    if "proof-evidence.py run-tla" not in workflow:
         fail(f"TLA model is not executed by CI: {model}")
 
 
@@ -118,7 +137,7 @@ def validate_kani(reference: str, corpus: dict[str, str], workflow: str) -> None
         for source_path in locations
     ):
         fail(f"Kani reference is not annotated as a proof harness: {reference}")
-    if f"--harness {harness}" not in workflow:
+    if "proof-evidence.py run-kani" not in workflow:
         fail(f"Kani harness is not executed by CI: {reference}")
 
 
@@ -223,7 +242,7 @@ def load_hil_evidence() -> dict[str, dict[str, object]]:
         if not isinstance(claim_scope, str) or not claim_scope:
             fail(f"{marker} has no bounded claim_scope")
         binding = entry.get("binding")
-        if binding not in (EXACT_HIL_BINDING, LEGACY_HIL_BINDING):
+        if binding not in (DECLARED_HIL_BINDING, LEGACY_HIL_BINDING):
             fail(f"{marker} has invalid evidence binding {binding!r}")
         artifacts_value = entry.get("artifacts")
         artifacts = (
@@ -232,7 +251,7 @@ def load_hil_evidence() -> dict[str, dict[str, object]]:
             else []
         )
         runtime_commit = entry.get("runtime_commit")
-        if binding == EXACT_HIL_BINDING:
+        if binding == DECLARED_HIL_BINDING:
             if (
                 not isinstance(runtime_commit, str)
                 or COMMIT_SHA.fullmatch(runtime_commit) is None
@@ -243,7 +262,9 @@ def load_hil_evidence() -> dict[str, dict[str, object]]:
             if not any(artifact["kind"] == "firmware-elf" for artifact in artifacts):
                 fail(f"{marker} exact evidence has no firmware-elf artifact")
             if "limitation" in entry:
-                fail(f"{marker} exact evidence must not carry a legacy limitation")
+                fail(f"{marker} declared evidence must not carry a legacy limitation")
+            if entry.get("artifact_verification") != "not-reverified":
+                fail(f"{marker} declared identity must not claim artifact verification")
         else:
             limitation = entry.get("limitation")
             if not isinstance(limitation, str) or not limitation:
@@ -346,9 +367,9 @@ def main() -> None:
 
         hil_records = [hil_evidence[marker] for marker in hil]
         hil_binding = (
-            "exact"
+            "declared"
             if hil_records
-            and all(item["binding"] == EXACT_HIL_BINDING for item in hil_records)
+            and all(item["binding"] == DECLARED_HIL_BINDING for item in hil_records)
             else "legacy"
             if hil_records
             else "not-required"
@@ -359,8 +380,8 @@ def main() -> None:
                 "status": entry.get(
                     "status",
                     (
-                        "hil-evidence-exact"
-                        if hil_binding == "exact"
+                        "hil-evidence-declared"
+                        if hil_binding == "declared"
                         else "hil-evidence-legacy"
                         if hil_binding == "legacy"
                         else "software-evidence"
@@ -429,16 +450,16 @@ def main() -> None:
             "software_evidence": sum(
                 item["status"] == "software-evidence" for item in inventory
             ),
-            "hil_evidence_exact": sum(
-                item["status"] == "hil-evidence-exact" for item in inventory
+            "hil_evidence_declared": sum(
+                item["status"] == "hil-evidence-declared" for item in inventory
             ),
             "hil_evidence_legacy": sum(
                 item["status"] == "hil-evidence-legacy" for item in inventory
             ),
             "hil_markers": len(referenced_hil_markers),
             "hil_markers_with_evidence": len(hil_evidence),
-            "hil_markers_exact": sum(
-                item["binding"] == EXACT_HIL_BINDING
+            "hil_markers_declared": sum(
+                item["binding"] == DECLARED_HIL_BINDING
                 for item in hil_evidence.values()
             ),
             "hil_markers_legacy": sum(
@@ -455,10 +476,10 @@ def main() -> None:
 
     print(
         f"requirements: {len(inventory)} IDs aligned with {normative_spec}; "
-        f"{report['summary']['hil_evidence_exact']} exact-HIL and "
+        f"{report['summary']['hil_evidence_declared']} declared-HIL and "
         f"{report['summary']['hil_evidence_legacy']} legacy-HIL requirements; "
-        f"{report['summary']['hil_markers_exact']}/{len(hil_evidence)} marker "
-        "records bind exact firmware"
+        f"{report['summary']['hil_markers_declared']}/{len(hil_evidence)} marker "
+        "records declare firmware hashes (no artifact re-verification)"
     )
 
 

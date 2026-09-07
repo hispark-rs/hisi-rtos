@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import subprocess
 import tomllib
+import time
 
 
 ROOT = Path(
@@ -63,6 +64,9 @@ def git_commit() -> str:
 
 def source_files() -> list[Path]:
     files = [
+        ROOT / "Cargo.toml",
+        ROOT / "Cargo.lock",
+        ROOT / "rust-toolchain.toml",
         REQUIREMENTS,
         ROOT / "docs/spec/hil-evidence.toml",
         WORKFLOW,
@@ -108,6 +112,7 @@ def find_harness_file(harness: str) -> Path:
 
 def build_contract() -> dict[str, object]:
     manifest = tomllib.loads(REQUIREMENTS.read_text())
+    subprocess.run(["uv", "run", "--script", str(ROOT / "scripts/check-requirements.py")], check=True, capture_output=True)
     workflow = WORKFLOW.read_text()
     requirements = manifest.get("requirement", [])
     kani_references = sorted(
@@ -180,7 +185,7 @@ def build_contract() -> dict[str, object]:
 
     files = source_files()
     return {
-        "schema": 1,
+        "schema": 2,
         "evidence_scope": "proof-contract",
         "source_commit": git_commit(),
         "source_tree_sha256": tree_digest(files),
@@ -224,10 +229,11 @@ def record_kani(args: argparse.Namespace) -> None:
     identity = ci_identity(args.allow_local)
     if identity["commit"] != contract["source_commit"]:
         fail("Kani run commit does not match proof contract")
+    receipts = validate_receipts(args, contract, "kani")
     write_json(
         args.output,
         {
-            "schema": 1,
+            "schema": 2,
             "evidence_scope": "completed-proof-run",
             "kind": "kani",
             "result": "pass",
@@ -236,6 +242,7 @@ def record_kani(args: argparse.Namespace) -> None:
             "source_tree_sha256": contract["source_tree_sha256"],
             "ci": identity,
             "version": contract["kani"]["version"],
+            "receipts": receipts,
             "harnesses": [
                 item["name"] for item in contract["kani"]["harnesses"]
             ],
@@ -248,6 +255,7 @@ def record_tla(args: argparse.Namespace) -> None:
     identity = ci_identity(args.allow_local)
     if identity["commit"] != contract["source_commit"]:
         fail("TLA+ run commit does not match proof contract")
+    receipts = validate_receipts(args, contract, "tla")
     logs = []
     for model in contract["tla"]["models"]:
         log = args.logs / f"{model['name']}.log"
@@ -267,7 +275,7 @@ def record_tla(args: argparse.Namespace) -> None:
     write_json(
         args.output,
         {
-            "schema": 1,
+            "schema": 2,
             "evidence_scope": "completed-proof-run",
             "kind": "tla",
             "result": "pass",
@@ -278,8 +286,89 @@ def record_tla(args: argparse.Namespace) -> None:
             "version": contract["tla"]["version"],
             "tool_sha256": contract["tla"]["tool_sha256"],
             "logs": logs,
+            "receipts": receipts,
         },
     )
+
+
+def proof_items(contract: dict, kind: str) -> list[dict]:
+    return contract[kind]["harnesses" if kind == "kani" else "models"]
+
+
+def proof_command(item: dict, kind: str) -> list[str]:
+    if kind == "kani":
+        return ["cargo", "kani", "--harness", item["reference"]]
+    return ["java", "-cp", "/tmp/tla2tools.jar", "tlc2.TLC", "-workers", "4",
+            "-config", Path(item["config"]).name, Path(item["model"]).name]
+
+
+def verify_result(item: dict, kind: str, receipt: dict, log: str) -> None:
+    if kind == "kani":
+        if (receipt["exit_code"] != 0
+                or f"Checking harness {item['reference']}..." not in log
+                or "Complete - 1 successfully verified harnesses, 0 failures, 1 total." not in log):
+            fail(f"Kani harness did not pass exactly once: {item['name']}")
+    else:
+        expected_code = 12 if item.get("expected_result") == "counterexample" else 0
+        if receipt["exit_code"] != expected_code or item["expected"] not in log:
+            fail(f"TLC did not return the expected result: {item['name']}")
+
+
+def validate_receipts(args: argparse.Namespace, contract: dict, kind: str) -> list[dict]:
+    receipts = []
+    identity = ci_identity(args.allow_local)
+    expected = {item["name"] for item in proof_items(contract, kind)}
+    actual = {path.stem for path in args.logs.glob("*.json")}
+    if actual != expected:
+        fail(f"missing or unexpected {kind} execution receipts: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}")
+    for item in proof_items(contract, kind):
+        receipt = json.loads((args.logs / f"{item['name']}.json").read_text())
+        log_path = args.logs / f"{item['name']}.log"
+        if not log_path.is_file():
+            fail(f"missing {kind} log {log_path.name}")
+        for key, value in {
+            "contract_sha256": sha256_file(args.contract), "ci": identity,
+            "command": proof_command(item, kind), "log_sha256": sha256_file(log_path),
+            "item": item, "version": contract[kind]["version"],
+        }.items():
+            if receipt.get(key) != value:
+                fail(f"{kind} receipt {item['name']} mismatches {key}")
+        verify_result(item, kind, receipt, log_path.read_text(errors="replace"))
+        receipts.append(receipt)
+    return receipts
+
+
+def execute_proofs(args: argparse.Namespace, kind: str) -> None:
+    contract = load_contract(args.contract)
+    identity = ci_identity(args.allow_local)
+    if identity["commit"] != contract["source_commit"]:
+        fail("proof execution commit does not match contract")
+    args.logs.mkdir(parents=True, exist_ok=True)
+    if any(args.logs.iterdir()):
+        fail("proof execution requires a fresh receipt directory")
+    if kind == "kani":
+        version = subprocess.check_output(["cargo", "kani", "--version"], text=True).strip()
+        if contract[kind]["version"] not in version.split():
+            fail(f"unexpected Kani version: {version}")
+    else:
+        if sha256_file(Path("/tmp/tla2tools.jar")) != contract[kind]["tool_sha256"]:
+            fail("TLC tool checksum mismatch")
+        version = contract[kind]["version"]
+    for item in proof_items(contract, kind):
+        command = proof_command(item, kind)
+        started = time.monotonic()
+        completed = subprocess.run(command, cwd=ROOT if kind == "kani" else ROOT / "spec",
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=1800)
+        print(completed.stdout, flush=True)
+        log = args.logs / f"{item['name']}.log"
+        log.write_text(completed.stdout)
+        receipt = {"schema": 1, "command": command, "exit_code": completed.returncode,
+                   "duration_seconds": time.monotonic() - started,
+                   "version": contract[kind]["version"], "tool_identity": version,
+                   "ci": identity, "item": item,
+                   "contract_sha256": sha256_file(args.contract), "log_sha256": sha256_file(log)}
+        write_json(args.logs / f"{item['name']}.json", receipt)
+        verify_result(item, kind, receipt, completed.stdout)
 
 
 def parse_args() -> argparse.Namespace:
@@ -288,13 +377,12 @@ def parse_args() -> argparse.Namespace:
     contract = subparsers.add_parser("contract")
     contract.add_argument("--output", type=Path, required=True)
 
-    for name in ("record-kani", "record-tla"):
+    for name in ("record-kani", "record-tla", "run-kani", "run-tla"):
         command = subparsers.add_parser(name)
         command.add_argument("--contract", type=Path, required=True)
-        command.add_argument("--output", type=Path, required=True)
+        command.add_argument("--output", type=Path, required=name.startswith("record"))
         command.add_argument("--allow-local", action="store_true")
-        if name == "record-tla":
-            command.add_argument("--logs", type=Path, required=True)
+        command.add_argument("--logs", type=Path, required=True)
     return parser.parse_args()
 
 
@@ -304,6 +392,8 @@ def main() -> None:
         write_json(args.output, build_contract())
     elif args.command == "record-kani":
         record_kani(args)
+    elif args.command.startswith("run-"):
+        execute_proofs(args, args.command.removeprefix("run-"))
     else:
         record_tla(args)
 
