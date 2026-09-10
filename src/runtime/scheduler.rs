@@ -1315,6 +1315,28 @@ impl Sched {
             .map(|started_at| started_at.saturating_add(u64::from(max_duration.get())))
     }
 
+    pub(super) fn next_dispatch_deadline(&mut self, now: u64) -> Option<u64> {
+        let current = &self.tasks[self.current];
+        if current.state == State::Running
+            && current.scheduler_lock_depth == 0
+            && (self.current == IDLE_SLOT
+                || matches!(current.run_policy, RunPolicy::Preemptive { .. }))
+            && self.ready_head[..if self.current == IDLE_SLOT {
+                self.ready_head.len()
+            } else {
+                current.priority as usize
+            }]
+                .iter()
+                .any(|&head| head != NIL)
+        {
+            // An IRQ can wake higher-priority work while consuming an older
+            // committed handoff to this task. Ready tasks have no sleep
+            // deadline; retain a dispatch opportunity without another IRQ.
+            return Some(now);
+        }
+        self.next_time_slice_deadline(now)
+    }
+
     pub(super) fn next_time_slice_deadline(&mut self, now: u64) -> Option<u64> {
         let RunPolicy::Preemptive { time_slice } = self.tasks[self.current].run_policy else {
             self.time_slice_deadline = 0;
@@ -1343,6 +1365,27 @@ fn dynamic_slot_end(dynamic_capacity: usize) -> usize {
 #[cfg(kani)]
 mod proofs {
     use super::*;
+
+    #[kani::proof]
+    #[kani::unwind(34)]
+    fn higher_ready_work_has_a_dispatch_deadline_for_preemptive_current() {
+        let mut scheduler = Sched::new();
+        let current_priority = kani::any::<u8>();
+        let ready_priority = kani::any::<u8>();
+        kani::assume(current_priority < 32 && ready_priority < current_priority);
+        let now = kani::any::<u64>();
+        scheduler.tasks[0].state = State::Running;
+        scheduler.tasks[0].priority = current_priority;
+        scheduler.tasks[0].run_policy = RunPolicy::Preemptive {
+            time_slice: NonZeroU32::new(5).unwrap(),
+        };
+        scheduler.tasks[2].state = State::Ready;
+        scheduler.tasks[2].priority = ready_priority;
+        scheduler.ready_push(2);
+        assert_eq!(scheduler.next_dispatch_deadline(now), Some(now));
+        assert!(scheduler.ready_contains(2));
+        assert!(scheduler.pending_switch.is_none());
+    }
 
     fn prepared_scheduler() -> (Sched, SwitchIntent) {
         let mut scheduler = Sched::new();

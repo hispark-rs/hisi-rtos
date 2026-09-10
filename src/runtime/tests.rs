@@ -1243,6 +1243,72 @@ fn stale_timer_programming_ticket_requires_retry() {
 }
 
 #[test]
+fn pending_handoff_cannot_leave_higher_ready_work_without_a_dispatch_deadline() {
+    let mut scheduler = Sched::new();
+    scheduler.started = true;
+    scheduler.current = 2;
+    scheduler.tasks[2].state = State::Running;
+    scheduler.tasks[2].priority = 4;
+    ready_task(&mut scheduler, 0, 31);
+    scheduler.tasks[3].state = State::Sleeping;
+    scheduler.tasks[3].priority = 0;
+    scheduler.tasks[3].wake_at = 11;
+
+    // A blocking worker commits main before its pending SWI is delivered.
+    scheduler.tasks[2].state = State::Blocked;
+    let intent = scheduler.prepare_switch_away_decision(2, 0, true).unwrap();
+    assert_eq!(intent.target.slot, 0);
+    // TIMER IRQ may consume the ticket before thread mode can pend the SWI.
+    assert_eq!(scheduler.on_timer(11, NonZeroU32::new(100).unwrap()), None);
+    let (previous, next) = scheduler.consume_pending_switch().unwrap();
+    scheduler.account_switch(previous, next, 11);
+    scheduler.tasks[next].state = State::Running;
+    scheduler.current = next;
+
+    assert!(scheduler.ready_contains(3));
+    assert_eq!(scheduler.earliest_wake_deadline(), None);
+    assert_eq!(scheduler.earliest_budget_deadline(), None);
+    assert_eq!(scheduler.next_dispatch_deadline(11), Some(11));
+    // Every rearm still requests the port's minimum non-zero timer delay.
+    assert_eq!(scheduler.next_dispatch_deadline(12), Some(12));
+    assert_eq!(scheduler.take_irq_epilogue_target(0, 12), Some((0, 3)));
+}
+
+#[test]
+fn ready_dispatch_deadline_preserves_policy_and_lock_boundaries() {
+    let mut scheduler = Sched::new();
+    scheduler.tasks[0].state = State::Running;
+    scheduler.tasks[0].priority = 31;
+    ready_task(&mut scheduler, 2, 0);
+    assert_eq!(scheduler.next_dispatch_deadline(10), None);
+    scheduler.tasks[0].run_policy = RunPolicy::Budgeted(
+        BudgetSpec::try_new(NonZeroU32::new(5).unwrap(), NonZeroU32::new(10).unwrap()).unwrap(),
+    );
+    assert_eq!(scheduler.next_dispatch_deadline(10), None);
+    scheduler.tasks[0].run_policy = RunPolicy::Preemptive {
+        time_slice: NonZeroU32::new(5).unwrap(),
+    };
+    scheduler.tasks[0].scheduler_lock_depth = 1;
+    assert_eq!(scheduler.next_dispatch_deadline(10), None);
+    scheduler.tasks[0].scheduler_lock_depth = 0;
+    assert_eq!(scheduler.next_dispatch_deadline(10), Some(10));
+    scheduler.ready_pop();
+    assert_eq!(scheduler.next_dispatch_deadline(10), None);
+}
+
+#[test]
+fn idle_keeps_a_dispatch_deadline_for_ready_work() {
+    for priority in 0..32 {
+        let mut scheduler = Sched::new();
+        scheduler.current = IDLE_SLOT;
+        scheduler.tasks[IDLE_SLOT].state = State::Running;
+        scheduler.tasks[IDLE_SLOT].priority = 31;
+        ready_task(&mut scheduler, 2, priority);
+        assert_eq!(scheduler.next_dispatch_deadline(10), Some(10));
+    }
+}
+
+#[test]
 fn unrelated_deadline_rearm_does_not_postpone_time_slice() {
     let mut scheduler = Sched::new();
     ready_task(&mut scheduler, 1, 4);

@@ -26,6 +26,7 @@ WORKFLOW = ROOT / ".github/workflows/ci.yml"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TLC_SUCCESS = "Model checking completed. No error has been found."
 LEGACY_MODELS = {
+    "ReadyDispatchLegacy": "Invariant ReadyWorkHasDispatchOpportunity is violated",
     "ReadyOwnershipLegacy": "Invariant ReadyHasExactlyOneOwner is violated",
     "SwitchIntentCreationLegacy": "Invariant PreparedSourceNotResumed is violated",
 }

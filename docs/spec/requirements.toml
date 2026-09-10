@@ -267,6 +267,14 @@ tla = "spec/TimerRearm.tla:StableProgrammingIsCurrent"
 kani = "runtime::time::proofs::stale_timer_rearm_ticket_cannot_validate_after_new_claim"
 
 [[requirement]]
+id = "RTOS-DISPATCH-001"
+implementation = ["src/runtime/scheduler.rs:next_dispatch_deadline", "src/runtime/time.rs:rearm_timer", "src/runtime/scheduler.rs:consume_pending_switch"]
+host_tests = ["tests::pending_handoff_cannot_leave_higher_ready_work_without_a_dispatch_deadline", "tests::ready_dispatch_deadline_preserves_policy_and_lock_boundaries", "tests::idle_keeps_a_dispatch_deadline_for_ready_work"]
+tla = "spec/ReadyDispatch.tla:ReadyWorkHasDispatchOpportunity"
+kani = "runtime::scheduler::proofs::higher_ready_work_has_a_dispatch_deadline_for_preemptive_current"
+hil = []
+
+[[requirement]]
 id = "RTOS-CONTEXT-001"
 implementation = ["src/context.rs:TaskContext", "src/context.rs:cooperative_context_switch_fallback"]
 host_tests = []

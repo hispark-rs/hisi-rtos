@@ -209,6 +209,26 @@ are non-zero and `capacity <= replenishment_period`.
   stale ticket, recompute all RTOS and Embassy deadlines from one scheduler
   snapshot, and program again. A stale later deadline cannot be the final
   hardware state.
+- **RTOS-DISPATCH-001:** After consuming a committed handoff, an unlocked
+  running Preemptive task with a higher-priority ordinary Ready task (or idle
+  with any ordinary Ready task)
+  retains an immediate dispatch deadline, even when no sleeper, equal-priority
+  peer or external interrupt remains. Ready ownership alone is insufficient:
+  an IRQ may wake the higher-priority task while consuming an older ticket to
+  main, before the blocked source can pend its SWI. The production owner is
+  `next_dispatch_deadline` plus `rearm_timer`; the port rounds an already-due
+  deadline to its minimum non-zero timer delay. Cooperative and Budgeted user
+  tasks retain their existing non-preemptive/periodic-quota semantics.
+
+  This is a progress-opportunity safety property, not unconditional liveness
+  or a whole-system latency bound. It assumes bounded interrupt/lock latency,
+  eventual timer delivery, a progressing monotonic clock and a valid ready
+  queue. The host test replays commit, timer wake, consume and rearm using
+  production helpers; the bounded TLA+ model retains the legacy missing-arm
+  counterexample. Kani checks the production deadline helper for all ordered
+  priority pairs and timestamps with a 34-step unwind bound. Neither model
+  executes MMIO, trap assembly or radio firmware. New silicon evidence is
+  required; earlier reset matrices do not close this added requirement.
 - **RTOS-CONTEXT-001:** WS63 task creation, cooperative switch, and interrupt
   switch use one 272-byte context ABI. Interrupts preserve full GPR/FPR/FCSR;
   cooperative calls may populate only ABI-required callee-saved slots; all

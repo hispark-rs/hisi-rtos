@@ -91,7 +91,7 @@ pub(super) fn rearm_timer() {
                 .expect("ported runtime requires a scheduler-lock bound");
             let deadline = earliest_deadline(
                 scheduler.earliest_wake_deadline(),
-                scheduler.next_time_slice_deadline(now),
+                scheduler.next_dispatch_deadline(now),
                 scheduler.earliest_budget_deadline(),
                 scheduler.scheduler_lock_deadline(lock_limit),
                 embassy_next_expiration_locked(cs, now),
