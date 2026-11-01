@@ -1,8 +1,10 @@
 # hisi-rtos
 
 `no_std` scheduler and runtime services for HiSilicon embedded Rust firmware.
-Applications install caller-owned task-stack storage and start exactly one
-runtime before initializing radio firmware.
+The scheduler profile installs caller-owned task stacks before radio startup.
+The experimental `embassy-only` profile instead owns a HAL counter/alarm pair
+and does not compile or start the thread scheduler. See
+[`docs/embassy-time.md`](docs/embassy-time.md) for profiles and migration.
 
 The crate maintains one single-hart scheduler backend. Each thread chooses
 `RunPolicy::Cooperative`, `RunPolicy::Budgeted`, or `RunPolicy::Preemptive`.

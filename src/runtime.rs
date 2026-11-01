@@ -43,7 +43,7 @@ use sync::{
 };
 #[cfg(test)]
 use sync::{release_mutex_locked, release_semaphore_locked};
-mod time;
+pub(crate) mod time;
 #[cfg(test)]
 use time::{claim_timer_rearm_generation, earliest_deadline};
 use time::{now_ms, rearm_timer};
@@ -52,16 +52,14 @@ mod driver;
 mod resource;
 use resource::{RESOURCE_HANDLE_CAPACITY, ResourceKind, ResourceTable};
 
+#[cfg(all(feature = "embassy", not(feature = "embassy-only")))]
+use crate::embassy::queue::Queue as EmbassyTimeQueue;
 use core::cell::{Cell, RefCell, UnsafeCell};
 use core::ffi::c_void;
 use core::num::{NonZeroU32, NonZeroUsize};
 #[cfg(feature = "embassy")]
 use core::task::Waker;
 use critical_section::Mutex;
-#[cfg(feature = "embassy")]
-use embassy_time_driver::Driver as EmbassyTimeDriver;
-#[cfg(feature = "embassy")]
-use embassy_time_queue_utils::Queue as EmbassyTimeQueue;
 use hisi_rf_rtos_driver::{
     Error as DriverError, MutexHandle, Runtime, RuntimeContract, RuntimeExecutionProfile,
     SemaphoreHandle, TASK_RESOURCE_GROUP_CAPACITY, TaskAdmissionError, TaskCapacity, TaskConfig,

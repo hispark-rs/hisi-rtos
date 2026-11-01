@@ -29,13 +29,27 @@ jobs:
           path: |
             target/evidence/requirements.json
             target/evidence/proof-contract.json
-      - run: cargo test --locked --target x86_64-unknown-linux-gnu
+      - run: bash scripts/check-time-profiles.sh
       - run: cargo clippy -Zbuild-std=core --target riscv32imfc-unknown-none-elf -- -D warnings
       - run: cargo build -Zbuild-std=core --target riscv32imfc-unknown-none-elf
       - name: Check WS63 scheduler port
         run: cargo clippy --locked -Zbuild-std=core --target riscv32imfc-unknown-none-elf --features chip-ws63 -- -D warnings
       - name: Check WS63 scheduler port with Embassy time
         run: cargo build --locked -Zbuild-std=core --target riscv32imfc-unknown-none-elf --features chip-ws63,embassy
+
+  time-development:
+    name: Time profiles with pinned remote dependencies (not release qualification)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-09
+          components: rust-src, clippy
+      # Persist the explicit development config so trybuild child Cargo invocations
+      # inherit the same remote-only graph. The registry lane above stays separate.
+      - run: mkdir -p .cargo && cp .ci/development-dependencies.toml .cargo/config.toml
+      - run: bash scripts/check-time-profiles.sh
 
   kani:
     runs-on: ubuntu-latest

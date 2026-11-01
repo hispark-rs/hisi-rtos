@@ -15,17 +15,27 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [features]
 default = []
-embassy = ["dep:embassy-time-driver", "dep:embassy-time-queue-utils"]
-chip-ws63 = ["dep:hisi-hal"]
+embassy = ["dep:embassy-time-driver"]
+# Explicit alternative profile: no scheduler startup API, no RF runtime install.
+embassy-only = ["embassy", "dep:hisi-hal", "dep:nb"]
+chip-ws63 = ["dep:hisi-hal", "hisi-hal/chip-ws63"]
+chip-ws53 = ["dep:hisi-hal", "hisi-hal/chip-ws53"]
+chip-bs21 = ["dep:hisi-hal", "hisi-hal/chip-bs21"]
+unstable = ["hisi-hal?/unstable"]
+defmt = ["dep:defmt", "hisi-hal?/defmt"]
 
 [dependencies]
 critical-section = "1"
 embassy-time-driver = { version = "0.2", optional = true, features = ["tick-hz-1_000_000"] }
-embassy-time-queue-utils = { version = "0.3", optional = true, features = ["generic-queue-16"] }
 hisi-rf-rtos-driver = "=0.1.0-alpha.20"
 hisi-alloc = "0.1.0-alpha.3"
-hisi-hal = { version = "0.7.0-alpha.7", default-features = false, features = ["chip-ws63", "unstable"], optional = true }
+hisi-hal = { version = "0.7.0-alpha.10", default-features = false, features = ["unstable"], optional = true }
+nb = { version = "1", optional = true }
+defmt = { version = "0.3", optional = true }
 
 [dev-dependencies]
 critical-section = { version = "1", features = ["std"] }
 trybuild = "1"
+
+[target.'cfg(not(target_arch = "riscv32"))'.dev-dependencies]
+proptest = "1"
