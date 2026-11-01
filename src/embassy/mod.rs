@@ -6,14 +6,31 @@
 //! separately: Cargo features unify across packages in a single invocation.
 //! Both use the 1 MHz tick ABI; an ABI tick is not a physical accuracy guarantee.
 //!
-//! The standalone profile deliberately does not expose scheduler startup. This
-//! prevents an accidental feature union from starting a second timer owner:
-//! ```compile_fail
-//! # #[cfg(feature = "embassy-only")]
-//! use hisi_rtos::start_cooperative;
-//! # #[cfg(not(feature = "embassy-only"))]
-//! compile_error!("This example tests the standalone profile only");
-//! ```
+#![cfg_attr(
+    feature = "embassy-only",
+    doc = r#"
+The standalone profile deliberately does not expose scheduler startup or its
+storage. An accidental Cargo feature union cannot start a second timer owner:
+```compile_fail,E0432
+use hisi_rtos::start_cooperative;
+```
+```compile_fail,E0432
+use hisi_rtos::start_with_port;
+```
+```compile_fail,E0432
+use hisi_rtos::SchedulerStorage;
+```
+"#
+)]
+#![cfg_attr(
+    not(feature = "embassy-only"),
+    doc = r#"
+The shared profile retains the existing scheduler startup and storage API:
+```no_run
+use hisi_rtos::{start_cooperative, start_with_port, SchedulerStorage};
+```
+"#
+)]
 
 use core::task::Waker;
 use embassy_time_driver::Driver;

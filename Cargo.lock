@@ -312,7 +312,7 @@ dependencies = [
 [[package]]
 name = "hisi-hal"
 version = "0.7.0-alpha.10"
-source = "git+https://github.com/hispark-rs/hisi-hal.git?rev=2b6cfcec688d3e2ea7e5f294e2d49d45d9091135#2b6cfcec688d3e2ea7e5f294e2d49d45d9091135"
+source = "git+https://github.com/hispark-rs/hisi-hal.git?rev=f39aef7bfd545486fc7cf466e9e8060d9688a846#f39aef7bfd545486fc7cf466e9e8060d9688a846"
 dependencies = [
  "bs2x-pac",
  "cfg-if",
